@@ -1,0 +1,18 @@
+# Perfil de pruebas de integración: PostgreSQL y Redis reales (servicios del pipeline de CI
+# o 'docker compose up postgres redis' en local).
+spring:
+  datasource:
+    url: jdbc:postgresql://${TEST_DB_HOST:localhost}:${TEST_DB_PORT:5432}/${TEST_DB_NAME:tripbus_booking_test}
+    username: ${TEST_DB_USERNAME:tripbus}
+    password: ${TEST_DB_PASSWORD:tripbus_local_pw}
+  flyway:
+    clean-disabled: false
+  data:
+    redis:
+      host: ${TEST_REDIS_HOST:localhost}
+      port: ${TEST_REDIS_PORT:6379}
+
+tripbus:
+  events:
+    stream: tripbus:events:test
+    consumer-enabled: false

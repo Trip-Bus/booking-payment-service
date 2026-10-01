@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: booking-payment-service
+
+  datasource:
+    url: jdbc:postgresql://${DB_URL:localhost}:${DB_PORT:5432}/tripbus_booking
+    username: ${DB_USERNAME:tripbus}
+    password: ${DB_PASSWORD:tripbus_local_pw}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${IDENTITY_JWKS_URI:http://localhost:16001/.well-known/jwks.json}
+
+server:
+  port: 16004
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: booking-payment-service
+
+tripbus:
+  internal-token: ${INTERNAL_API_TOKEN:tripbus-internal-dev-token}
+  events:
+    enabled: ${EVENTS_ENABLED:true}
+    consumer-enabled: ${EVENTS_CONSUMER_ENABLED:true}
+    stream: ${EVENTS_STREAM:tripbus:events}
+    max-len: 100000
+    group: booking-payment-service
+  booking:
+    seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:16003}
+    catalog-url: ${CATALOG_URL:http://localhost:16002}
+    flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:16006}
+    idempotency-ttl: 24h
+    ticket-secret: ${TICKET_SECRET:tripbus-ticket-dev-secret}
+  payment:
+    webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:16004/webhooks/payment}
+    webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus-webhook-dev-secret}
+    webhook-delay: 1500ms
+    # Simula a la pasarela reenviando el mismo webhook (US-034: no debe cobrar ni emitir dos veces).
+    duplicate-webhook: ${PAYMENT_DUPLICATE_WEBHOOK:true}
