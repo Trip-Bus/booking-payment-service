@@ -1,0 +1,22 @@
+# Vulnerabilidades ACEPTADAS temporalmente por Trivy (CI y escaneo local).
+# Regla: solo se aceptan las que NO tienen arreglo en la línea Spring Boot 3.x. Todo lo que tenga
+# parche se corrige subiendo versiones, nunca se ignora aquí.
+# Cada entrada vence en expired_at: a partir de esa fecha Trivy vuelve a fallar, para obligar a
+# revisar la decisión (la salida prevista es migrar a Spring Boot 4.1 / Spring Framework 7).
+# Lista obtenida escaneando ESTA imagen (Trivy 0.70.0, CRITICAL/HIGH, --ignore-unfixed): son las
+# únicas que aparecen.
+vulnerabilities:
+  - id: CVE-2026-47884
+    statement: >-
+      spring-webmvc 6.2.x: RCE vía XsltView. Solo se corrige en Spring Framework 7.0.9; no hay
+      arreglo en Spring Boot 3.x. booking-payment-service no usa XsltView ni vistas de servidor:
+      solo controladores REST con JSON y el webhook de pagos, que recibe JSON firmado con HMAC.
+      Se resuelve con la migración a Spring Boot 4.1.
+    expired_at: 2027-01-31
+  - id: CVE-2026-47890
+    statement: >-
+      spring-webmvc 6.2.x: corrupción de flujos Server-Sent Events con view fragments. Solo se
+      corrige en Spring Framework 7.0.9; no hay arreglo en Spring Boot 3.x. booking-payment-service
+      no expone SSE (ni SseEmitter ni text/event-stream): el estado del pago se consulta con GET
+      /bookings/{id}. Se resuelve con la migración a Spring Boot 4.1.
+    expired_at: 2027-01-31

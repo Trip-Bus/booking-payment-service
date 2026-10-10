@@ -1,6 +1,7 @@
 package com.tripbus.booking.client;
 
 import com.tripbus.booking.config.BookingProperties;
+import com.tripbus.booking.config.RequestIdPropagationInterceptor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -24,6 +25,7 @@ public class FlashOffersClient {
                 .baseUrl(properties.flashOffersUrl())
                 .requestFactory(factory)
                 .defaultHeader("X-Internal-Token", token)
+                .requestInterceptor(new RequestIdPropagationInterceptor())
                 .build();
     }
 

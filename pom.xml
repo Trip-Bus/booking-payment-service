@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.4</version>
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
@@ -19,6 +19,59 @@
 
     <properties>
         <java.version>21</java.version>
+
+        <!-- Parches de seguridad (Trivy) más nuevos que los que gestiona Boot 3.5.16, dentro de las
+             mismas líneas menores. Quitarlos cuando una Boot 3.5.x posterior ya los traiga. -->
+        <jackson-bom.version>2.21.7</jackson-bom.version>
+        <netty.version>4.1.137.Final</netty.version>
+        <tomcat.version>10.1.60</tomcat.version>
+        <postgresql.version>42.7.12</postgresql.version>
+
+        <zxing.version>3.5.3</zxing.version>
+        <springdoc.version>2.8.17</springdoc.version>
+        <logstash-logback.version>8.0</logstash-logback.version>
+        <jacoco.version>0.8.12</jacoco.version>
+        <sonar-maven-plugin.version>5.8.0.7211</sonar-maven-plugin.version>
+
+        <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
+             La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
+             Fijados con la medición del 2026-10-09 redondeada hacia abajo al 5 %: líneas 63,8 % -> 0.60;
+             ramas 44,0 % -> 0.40 (por debajo del 0.60 de referencia: subirlo es la próxima meta). -->
+        <jacoco.minimo.lineas>0.60</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.40</jacoco.minimo.ramas>
+
+        <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
+             cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
+        <sonar.organization>trip-bus</sonar.organization>
+        <sonar.projectKey>Trip-Bus_booking-payment-service</sonar.projectKey>
+        <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+        <sonar.coverage.jacoco.xmlReportPaths>${project.build.directory}/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
+        <!-- Fuera de la cobertura solo lo que no tiene lógica que probar (se sigue analizando como código):
+             arranque de Spring, records de entrada/salida de web/dto (ninguno tiene métodos), entidades JPA
+             de solo constructor/getters y la definición del documento OpenAPI. Se quedan DENTRO porque
+             tienen lógica: domain/Booking (calcula el total y cambia de estado), domain/Payment (aprobar,
+             rechazar, reembolsar), domain/IdempotencyKey (completar) y config/BookingProperties y
+             PaymentProperties (valores por defecto). MISMA lista en <excludes> de jacoco-maven-plugin. -->
+        <sonar.coverage.exclusions>
+            **/BookingApplication.java,
+            **/web/dto/BookingResponse.java,
+            **/web/dto/CreateBookingRequest.java,
+            **/web/dto/PassengerRequest.java,
+            **/web/dto/PassengerResponse.java,
+            **/web/dto/PayRequest.java,
+            **/web/dto/PaymentResponse.java,
+            **/web/dto/PaymentSummary.java,
+            **/web/dto/SagaStepResponse.java,
+            **/web/dto/TicketResponse.java,
+            **/web/dto/ValidateTicketRequest.java,
+            **/domain/Passenger.java,
+            **/domain/Refund.java,
+            **/domain/SagaLogEntry.java,
+            **/domain/Ticket.java,
+            **/domain/WebhookLog.java,
+            **/common/events/ProcessedEvent.java,
+            **/config/OpenApiConfig.java
+        </sonar.coverage.exclusions>
     </properties>
 
     <dependencies>
@@ -77,17 +130,34 @@
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
+
+        <!-- Código QR del tiquete. -->
         <dependency>
             <groupId>com.google.zxing</groupId>
             <artifactId>core</artifactId>
-            <version>3.5.3</version>
+            <version>${zxing.version}</version>
         </dependency>
 
         <dependency>
             <groupId>com.google.zxing</groupId>
             <artifactId>javase</artifactId>
-            <version>3.5.3</version>
+            <version>${zxing.version}</version>
         </dependency>
+
+        <!-- Swagger UI / OpenAPI (solo IDE y QA; apagado en application-prod.yml). -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- Logs en JSON en PROD (logback-spring.xml). -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>${logstash-logback.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -99,27 +169,138 @@
             <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- Pruebas de integración contra PostgreSQL y Redis reales (BookingSagaIT, Testcontainers). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Versión fija del scanner que invoca el CI (mvn ... sonar-maven-plugin:sonar). -->
+                <plugin>
+                    <groupId>org.sonarsource.scanner.maven</groupId>
+                    <artifactId>sonar-maven-plugin</artifactId>
+                    <version>${sonar-maven-plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <!-- META-INF/build-info.properties: versión y fecha en /actuator/info. -->
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Las pruebas de integración (*IT) necesitan PostgreSQL y Redis reales:
-                         se activan con la variable de entorno TRIPBUS_IT=true
-                         (el pipeline de CI las corre siempre). -->
+                    <!-- Unitarias (*Test, *Tests) e integración (*IT, Testcontainers: requiere Docker). -->
                     <includes>
                         <include>**/*Test.java</include>
                         <include>**/*Tests.java</include>
                         <include>**/*IT.java</include>
                     </includes>
                 </configuration>
+            </plugin>
+
+            <!-- Cobertura: target/site/jacoco/index.html (y jacoco.xml para Sonar).
+                 Además jacoco:check (fase verify) corre en TODAS las ramas, también en main donde no
+                 corre Sonar: rompe el build si la cobertura total baja de jacoco.minimo.lineas/ramas.
+                 La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <!-- Mismas exclusiones que sonar.coverage.exclusions, para que el % coincida. -->
+                    <excludes>
+                        <exclude>**/BookingApplication.class</exclude>
+                        <exclude>**/web/dto/BookingResponse.class</exclude>
+                        <exclude>**/web/dto/CreateBookingRequest.class</exclude>
+                        <exclude>**/web/dto/PassengerRequest.class</exclude>
+                        <exclude>**/web/dto/PassengerResponse.class</exclude>
+                        <exclude>**/web/dto/PayRequest.class</exclude>
+                        <exclude>**/web/dto/PaymentResponse.class</exclude>
+                        <exclude>**/web/dto/PaymentSummary.class</exclude>
+                        <exclude>**/web/dto/SagaStepResponse.class</exclude>
+                        <exclude>**/web/dto/TicketResponse.class</exclude>
+                        <exclude>**/web/dto/ValidateTicketRequest.class</exclude>
+                        <exclude>**/domain/Passenger.class</exclude>
+                        <exclude>**/domain/Refund.class</exclude>
+                        <exclude>**/domain/SagaLogEntry.class</exclude>
+                        <exclude>**/domain/Ticket.class</exclude>
+                        <exclude>**/domain/WebhookLog.class</exclude>
+                        <exclude>**/common/events/ProcessedEvent.class</exclude>
+                        <exclude>**/config/OpenApiConfig.class</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.minimo.lineas}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.minimo.ramas}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
