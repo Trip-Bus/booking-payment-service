@@ -1,18 +1,8 @@
-# Perfil de pruebas de integración: PostgreSQL y Redis reales (servicios del pipeline de CI
-# o 'docker compose up postgres redis' en local).
-spring:
-  datasource:
-    url: jdbc:postgresql://${TEST_DB_HOST:localhost}:${TEST_DB_PORT:5432}/${TEST_DB_NAME:tripbus_booking_test}
-    username: ${TEST_DB_USERNAME:tripbus}
-    password: ${TEST_DB_PASSWORD:tripbus_local_pw}
-  flyway:
-    clean-disabled: false
-  data:
-    redis:
-      host: ${TEST_REDIS_HOST:localhost}
-      port: ${TEST_REDIS_PORT:6379}
-
+# Perfil de pruebas de integración (BookingSagaIT). PostgreSQL y Redis los levanta Testcontainers y
+# @ServiceConnection inyecta su host/puerto: aquí solo va lo propio de las pruebas.
 tripbus:
   events:
+    # Stream aparte para no mezclar eventos de prueba con los de QA.
     stream: tripbus:events:test
+    # Sin consumidor en segundo plano: las pruebas invocan los handlers directamente.
     consumer-enabled: false

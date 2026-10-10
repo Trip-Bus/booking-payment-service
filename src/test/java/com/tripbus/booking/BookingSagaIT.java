@@ -8,22 +8,25 @@ import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.payment.PaymentGateway;
 import com.tripbus.booking.payment.WebhookSigner;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.api.BeforeAll;
+import com.tripbus.booking.repository.WebhookLogRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -49,13 +52,25 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** Saga de compra completa contra PostgreSQL real; los otros servicios se simulan (TRIPBUS_IT=true). */
-@EnabledIfEnvironmentVariable(named = "TRIPBUS_IT", matches = "true")
+/**
+ * Saga de compra completa contra PostgreSQL 16 y Redis 7 reales (Testcontainers, requiere Docker):
+ * Flyway aplica las migraciones REALES de db/migration sobre una base nueva en cada ejecución.
+ * Seat Inventory, Catalog, Flash Offers y la pasarela se simulan con mocks.
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("it")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@Testcontainers
 class BookingSagaIT {
+
+    @Container
+    @ServiceConnection
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+
+    @Container
+    @ServiceConnection(name = "redis")
+    static GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
     @Autowired
     private MockMvc mvc;
@@ -64,25 +79,19 @@ class BookingSagaIT {
     @Autowired
     private WebhookSigner signer;
     @Autowired
-    private Flyway flyway;
+    private WebhookLogRepository webhookLogs;
 
-    @MockBean
+    @MockitoBean
     private SeatInventoryClient seatInventory;
-    @MockBean
+    @MockitoBean
     private CatalogClient catalog;
-    @MockBean
+    @MockitoBean
     private FlashOffersClient flashOffers;
-    @MockBean
+    @MockitoBean
     private PaymentGateway gateway;
 
     private final UUID userId = UUID.randomUUID();
     private final UUID itineraryId = UUID.randomUUID();
-
-    @BeforeAll
-    void limpiar() {
-        flyway.clean();
-        flyway.migrate();
-    }
 
     @BeforeEach
     void simularServicios() {
@@ -228,10 +237,13 @@ class BookingSagaIT {
 
     @Test
     void webhookConFirmaInvalidaSeRechaza() throws Exception {
+        long antes = webhookLogs.count();
         mvc.perform(post("/webhooks/payment").contentType(MediaType.APPLICATION_JSON)
                         .header("X-Signature", "sha256=falsa").content("{\"reference\":\"x\",\"status\":\"APPROVED\"}"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error.code").value("INVALID_SIGNATURE"));
+        // El intento rechazado queda registrado en webhook_log (auditoría).
+        assertThat(webhookLogs.count()).isEqualTo(antes + 1);
     }
 
     @Test

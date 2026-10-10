@@ -1,0 +1,27 @@
+# Perfil "desplegado": común a QA y PROD (se activa solo, vía spring.profiles.group en application.yml).
+# Quita los valores por defecto de los secretos y de las URLs de otros servicios que application.yml
+# trae para correr desde el IDE: en un entorno desplegado SIEMPRE vienen de variables de entorno.
+# Si falta alguna de tripbus.required-env, RequiredSecretsCheck detiene el arranque con un mensaje claro.
+spring:
+  datasource:
+    password: ${DB_PASSWORD}
+  data:
+    redis:
+      password: ${REDIS_PASSWORD}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${IDENTITY_JWKS_URI}
+
+tripbus:
+  internal-token: ${INTERNAL_API_TOKEN}
+  booking:
+    seat-inventory-url: ${SEAT_INVENTORY_URL}
+    catalog-url: ${CATALOG_URL}
+    flash-offers-url: ${FLASH_OFFERS_URL}
+    ticket-secret: ${TICKET_SECRET}
+  payment:
+    webhook-url: ${PAYMENT_WEBHOOK_URL}
+    webhook-secret: ${PAYMENT_WEBHOOK_SECRET}
+  required-env: DB_PASSWORD,REDIS_PASSWORD,INTERNAL_API_TOKEN,IDENTITY_JWKS_URI,SEAT_INVENTORY_URL,CATALOG_URL,FLASH_OFFERS_URL,TICKET_SECRET,PAYMENT_WEBHOOK_SECRET,PAYMENT_WEBHOOK_URL
