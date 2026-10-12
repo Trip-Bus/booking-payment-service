@@ -62,6 +62,10 @@ management:
   info:
     env:
       enabled: true
+  health:
+    # El SMTP del tiquete por correo (US-033) es opcional: su caída no debe sacar al servicio de rotación.
+    mail:
+      enabled: false
 
 # /actuator/info: commit con el que se construyó la imagen (build-arg GIT_COMMIT del Dockerfile).
 info:
@@ -89,3 +93,11 @@ tripbus:
     # Simula a la pasarela reenviando el mismo webhook (US-034: no debe cobrar ni emitir dos veces).
     # application-qa.yml lo fija en true y application-prod.yml en false.
     duplicate-webhook: ${PAYMENT_DUPLICATE_WEBHOOK:true}
+  # US-033: el tiquete se envía por correo con el QR adjunto. Sin MAIL_HOST el envío queda deshabilitado
+  # (un WARN al arrancar); no es una variable obligatoria en ningún entorno.
+  mail:
+    host: ${MAIL_HOST:}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    from: "${MAIL_FROM:TripBus <no-reply@tripbus.co>}"

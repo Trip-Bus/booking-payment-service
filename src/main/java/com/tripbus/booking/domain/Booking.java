@@ -52,6 +52,10 @@ public class Booking {
     @Column(name = "hold_expira_en")
     private Instant holdExpiraEn;
 
+    /** US-033: correo del comprador (claim "email" del JWT) al que se envía el tiquete; null si no venía. */
+    @Column(name = "email_contacto")
+    private String emailContacto;
+
     @Column(name = "creado_en", nullable = false)
     private Instant creadoEn;
 
@@ -66,6 +70,11 @@ public class Booking {
 
     public Booking(UUID holdId, UUID userId, UUID itineraryId, UUID offerId, List<String> seatNumbers,
                    BigDecimal precioUnitario, String moneda, Instant holdExpiraEn, Instant now) {
+        this(holdId, userId, itineraryId, offerId, seatNumbers, precioUnitario, moneda, holdExpiraEn, null, now);
+    }
+
+    public Booking(UUID holdId, UUID userId, UUID itineraryId, UUID offerId, List<String> seatNumbers,
+                   BigDecimal precioUnitario, String moneda, Instant holdExpiraEn, String emailContacto, Instant now) {
         this.id = UUID.randomUUID();
         this.holdId = holdId;
         this.userId = userId;
@@ -76,6 +85,7 @@ public class Booking {
         this.total = precioUnitario.multiply(BigDecimal.valueOf(seatNumbers.size()));
         this.moneda = moneda;
         this.holdExpiraEn = holdExpiraEn;
+        this.emailContacto = emailContacto;
         this.estado = BookingStatus.PENDIENTE_PAGO;
         this.creadoEn = now;
         this.actualizadoEn = now;
@@ -128,6 +138,10 @@ public class Booking {
 
     public Instant getHoldExpiraEn() {
         return holdExpiraEn;
+    }
+
+    public String getEmailContacto() {
+        return emailContacto;
     }
 
     public Instant getCreadoEn() {

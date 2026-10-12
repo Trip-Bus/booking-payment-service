@@ -39,6 +39,14 @@ public class Ticket {
     @Column(name = "usado_por")
     private UUID usadoPor;
 
+    /** US-033: momento en que el tiquete se envió por correo al comprador (null mientras no se haya enviado). */
+    @Column(name = "notificado_en")
+    private Instant notificadoEn;
+
+    /** US-033: envíos por correo fallidos; el job de reintento deja de intentarlo al llegar a 5. */
+    @Column(name = "intentos_notificacion", nullable = false)
+    private int intentosNotificacion;
+
     protected Ticket() {
     }
 
@@ -81,5 +89,13 @@ public class Ticket {
 
     public UUID getUsadoPor() {
         return usadoPor;
+    }
+
+    public Instant getNotificadoEn() {
+        return notificadoEn;
+    }
+
+    public int getIntentosNotificacion() {
+        return intentosNotificacion;
     }
 }

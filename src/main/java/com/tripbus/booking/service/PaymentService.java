@@ -59,6 +59,7 @@ public class PaymentService {
     private final PaymentGateway gateway;
     private final WebhookSigner signer;
     private final TicketService ticketService;
+    private final TicketMailService ticketMail;
     private final SagaLogger saga;
     private final EventPublisher events;
     private final TransactionTemplate tx;
@@ -68,8 +69,8 @@ public class PaymentService {
     public PaymentService(BookingRepository bookingRepository, PaymentRepository paymentRepository,
                           RefundRepository refundRepository, WebhookLogRepository webhookLogRepository,
                           SeatInventoryClient seatInventory, PaymentGateway gateway, WebhookSigner signer,
-                          TicketService ticketService, SagaLogger saga, EventPublisher events,
-                          TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
+                          TicketService ticketService, TicketMailService ticketMail, SagaLogger saga,
+                          EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
@@ -78,6 +79,7 @@ public class PaymentService {
         this.gateway = gateway;
         this.signer = signer;
         this.ticketService = ticketService;
+        this.ticketMail = ticketMail;
         this.saga = saga;
         this.events = events;
         this.tx = tx;
@@ -294,6 +296,8 @@ public class PaymentService {
             payload.put("offerId", b.getOfferId());
             saga.log(bookingId, "TIQUETE_EMITIDO", "OK", Map.of("ticketId", ticket.getId()));
             events.publishAfterCommit(BookingEvents.TICKET_ISSUED, payload);
+            // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
+            ticketMail.sendAfterCommit(ticket.getId());
         });
     }
 

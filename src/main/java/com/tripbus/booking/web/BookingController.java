@@ -42,7 +42,8 @@ public class BookingController {
     @PostMapping
     public ResponseEntity<BookingResponse> create(@Valid @RequestBody CreateBookingRequest request,
                                                   Authentication authentication) {
-        BookingService.CreateResult result = bookingService.create(request, CurrentUser.id(authentication));
+        BookingService.CreateResult result = bookingService.create(request, CurrentUser.id(authentication),
+                CurrentUser.email(authentication));
         return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK).body(result.booking());
     }
 

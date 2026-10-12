@@ -8,6 +8,7 @@ import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.payment.PaymentGateway;
 import com.tripbus.booking.payment.WebhookSigner;
+import com.tripbus.booking.repository.TicketRepository;
 import com.tripbus.booking.repository.WebhookLogRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -80,6 +81,8 @@ class BookingSagaIT {
     private WebhookSigner signer;
     @Autowired
     private WebhookLogRepository webhookLogs;
+    @Autowired
+    private TicketRepository tickets;
 
     @MockitoBean
     private SeatInventoryClient seatInventory;
@@ -110,7 +113,8 @@ class BookingSagaIT {
     }
 
     private RequestPostProcessor pasajero() {
-        return jwt().jwt(j -> j.subject(userId.toString()).claim("role", "PASAJERO"))
+        return jwt().jwt(j -> j.subject(userId.toString()).claim("role", "PASAJERO")
+                        .claim("email", "ana.perez@mail.com"))
                 .authorities(new SimpleGrantedAuthority("ROLE_PASAJERO"));
     }
 
@@ -187,6 +191,11 @@ class BookingSagaIT {
                 .andExpect(jsonPath("$.pago.estado").value("APROBADO"))
                 .andReturn().getResponse().getContentAsString();
         String ticketId = objectMapper.readTree(booking).get("ticketId").asText();
+
+        // US-033: sin MAIL_HOST (perfil it) el correo está deshabilitado: la compra termina igual y no se intenta.
+        var ticket = tickets.findById(UUID.fromString(ticketId)).orElseThrow();
+        assertThat(ticket.getNotificadoEn()).isNull();
+        assertThat(ticket.getIntentosNotificacion()).isZero();
 
         mvc.perform(get("/tickets/{id}", ticketId).with(pasajero()))
                 .andExpect(status().isOk())

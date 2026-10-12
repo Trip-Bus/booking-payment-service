@@ -27,6 +27,15 @@ public final class CurrentUser {
         return null;
     }
 
+    /** Claim "email" del JWT, o null si el token no lo trae (tokens emitidos antes de incluirlo). */
+    public static String email(Authentication authentication) {
+        if (authentication instanceof JwtAuthenticationToken token) {
+            String email = token.getToken().getClaimAsString("email");
+            return email != null && !email.isBlank() ? email.trim() : null;
+        }
+        return null;
+    }
+
     public static UUID companyId(Authentication authentication) {
         if (authentication instanceof JwtAuthenticationToken token) {
             String companyId = token.getToken().getClaimAsString("companyId");

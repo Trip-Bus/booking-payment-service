@@ -76,8 +76,9 @@ public class BookingService {
     /**
      * US-031 (pasos 1-3 de la saga): valida la retención con Seat Inventory, calcula el
      * total (Catalog o Flash Offers) y registra la reserva con los datos del viajero.
+     * {@code emailContacto} (claim "email" del JWT, puede ser null) es a donde se enviará el tiquete.
      */
-    public CreateResult create(CreateBookingRequest request, UUID userId) {
+    public CreateResult create(CreateBookingRequest request, UUID userId, String emailContacto) {
         var existing = bookingRepository.findByHoldId(request.holdId());
         if (existing.isPresent()) {
             return new CreateResult(existingFor(existing.get(), userId), false);
@@ -117,7 +118,8 @@ public class BookingService {
             BookingResponse response = tx.execute(status -> {
                 Instant now = clock.instant();
                 Booking booking = bookingRepository.save(new Booking(hold.holdId(), userId, hold.itineraryId(),
-                        hold.offerId(), hold.seatNumbers(), precioUnitario, monedaFinal, hold.expiraEn(), now));
+                        hold.offerId(), hold.seatNumbers(), precioUnitario, monedaFinal, hold.expiraEn(), emailContacto,
+                        now));
                 for (int i = 0; i < request.pasajeros().size(); i++) {
                     PassengerRequest p = request.pasajeros().get(i);
                     passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
