@@ -154,6 +154,12 @@ Opcionales con valor por defecto: `SERVER_PORT` (18004), `DB_HOST` (localhost), 
 `REDIS_PORT` (18100), `PAYMENT_DUPLICATE_WEBHOOK` (solo IDE; en qa/prod lo fija el perfil).
 `DB_HOST` reemplaza a la antigua `DB_URL`.
 
+Tiquete por correo (US-033, opcionales en todos los entornos): `MAIL_HOST` (vacío = envío
+deshabilitado, con un WARN al arrancar), `MAIL_PORT` (1025), `MAIL_USERNAME`, `MAIL_PASSWORD` y
+`MAIL_FROM` (`TripBus <no-reply@tripbus.co>`). Al emitirse el tiquete se envía al correo del claim
+`email` del JWT con el QR en PNG adjunto; si el SMTP falla, un job lo reintenta cada minuto hasta 5
+veces. El correo nunca cambia el estado de la reserva ni del pago.
+
 ## Swagger
 
 Solo en IDE y QA (en `prod` springdoc está apagado y responde 404):

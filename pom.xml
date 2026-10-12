@@ -28,6 +28,7 @@
         <postgresql.version>42.7.12</postgresql.version>
 
         <zxing.version>3.5.3</zxing.version>
+        <greenmail.version>2.1.3</greenmail.version>
         <springdoc.version>2.8.17</springdoc.version>
         <logstash-logback.version>8.0</logstash-logback.version>
         <jacoco.version>0.8.12</jacoco.version>
@@ -35,10 +36,11 @@
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-12 redondeada hacia abajo al 5 %: líneas 66,7 % -> 0.65;
-             ramas 47,9 % -> 0.45 (por debajo del 0.60 de referencia: subirlo es la próxima meta). -->
-        <jacoco.minimo.lineas>0.65</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.45</jacoco.minimo.ramas>
+             Fijados con la medición del 2026-10-12 (US-033, tiquete por correo) redondeada hacia abajo al 5 %:
+             líneas 70,6 % -> 0.70; ramas 54,6 % -> 0.50 (por debajo del 0.60 de referencia: subirlo es la
+             próxima meta). -->
+        <jacoco.minimo.lineas>0.70</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.50</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
@@ -108,6 +110,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- US-033: envío del tiquete con el QR por correo (SMTP). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
         </dependency>
 
         <dependency>
@@ -186,6 +194,21 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Servidor SMTP en memoria para probar el envío del tiquete por correo (TicketMailIT). -->
+        <dependency>
+            <groupId>com.icegreen</groupId>
+            <artifactId>greenmail-junit5</artifactId>
+            <version>${greenmail.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Espera del envío en segundo plano en las pruebas (versión gestionada por Spring Boot). -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
