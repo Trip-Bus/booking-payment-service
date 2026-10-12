@@ -35,10 +35,10 @@
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-09 redondeada hacia abajo al 5 %: líneas 63,8 % -> 0.60;
-             ramas 44,0 % -> 0.40 (por debajo del 0.60 de referencia: subirlo es la próxima meta). -->
-        <jacoco.minimo.lineas>0.60</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.40</jacoco.minimo.ramas>
+             Fijados con la medición del 2026-10-12 redondeada hacia abajo al 5 %: líneas 66,7 % -> 0.65;
+             ramas 47,9 % -> 0.45 (por debajo del 0.60 de referencia: subirlo es la próxima meta). -->
+        <jacoco.minimo.lineas>0.65</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.45</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
