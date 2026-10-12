@@ -27,6 +27,7 @@ import java.security.MessageDigest;
 import java.time.Clock;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /** US-033: emisión del tiquete electrónico con código QR firmado. */
@@ -34,6 +35,11 @@ import java.util.UUID;
 public class TicketService {
 
     private static final String PREFIX = "TRIPBUS1";
+    private static final String USADO = "USADO";
+    private static final String VALIDO = "valido";
+    private static final String MOTIVO = "motivo";
+    private static final String ESTADO = "estado";
+    private static final String USADO_EN = "usadoEn";
 
     private final TicketRepository ticketRepository;
     private final BookingRepository bookingRepository;
@@ -80,6 +86,7 @@ public class TicketService {
                 .toList();
         CatalogClient.ItinerarySummary it = catalogClient.itinerary(booking.getItineraryId());
         return new TicketResponse(ticket.getId(), booking.getId(), ticket.getEstado(), ticket.getEmitidoEn(),
+                ticket.getUsadoEn(),
                 booking.getItineraryId(),
                 it != null ? it.origen() : null,
                 it != null ? it.destino() : null,
@@ -96,25 +103,39 @@ public class TicketService {
         return qrPng(ticket.qrCode());
     }
 
-    /** Valida un QR al abordar: firma correcta y tiquete existente. */
-    @Transactional(readOnly = true)
-    public Map<String, Object> validate(String qrCode) {
+    /**
+     * Valida un QR al abordar: formato, firma y tiquete existente. Si es válido lo marca como USADO con un
+     * UPDATE condicional atómico, así el mismo QR no sirve para abordar dos veces aunque se escanee en paralelo.
+     */
+    @Transactional
+    public Map<String, Object> validate(String qrCode, UUID validadorId) {
         int last = qrCode.lastIndexOf('|');
         if (!qrCode.startsWith(PREFIX + "|") || last < 0) {
-            return Map.of("valido", false, "motivo", "FORMATO_INVALIDO");
+            return Map.of(VALIDO, false, MOTIVO, "FORMATO_INVALIDO");
         }
         String content = qrCode.substring(0, last);
         String signature = qrCode.substring(last + 1);
         if (!MessageDigest.isEqual(sign(content).getBytes(StandardCharsets.UTF_8),
                 signature.getBytes(StandardCharsets.UTF_8))) {
-            return Map.of("valido", false, "motivo", "FIRMA_INVALIDA");
+            return Map.of(VALIDO, false, MOTIVO, "FIRMA_INVALIDA");
         }
         String[] parts = content.split("\\|");
         UUID ticketId = UUID.fromString(parts[1]);
-        return ticketRepository.findById(ticketId)
-                .<Map<String, Object>>map(t -> Map.of("valido", true, "ticketId", t.getId(), "bookingId",
-                        t.getBookingId(), "itineraryId", parts[3], "asientos", parts[4], "estado", t.getEstado()))
-                .orElse(Map.of("valido", false, "motivo", "TIQUETE_INEXISTENTE"));
+        int marcados = ticketRepository.marcarUsado(ticketId, clock.instant(), validadorId);
+        // Se relee tras el UPDATE (el contexto quedó limpio) para responder con lo que quedó en la BD.
+        Optional<Ticket> ticket = ticketRepository.findById(ticketId);
+        if (ticket.isEmpty()) {
+            return Map.of(VALIDO, false, MOTIVO, "TIQUETE_INEXISTENTE");
+        }
+        Ticket t = ticket.get();
+        if (marcados == 1) {
+            return Map.of(VALIDO, true, "ticketId", t.getId(), "bookingId", t.getBookingId(),
+                    "itineraryId", parts[3], "asientos", parts[4], ESTADO, t.getEstado(), USADO_EN, t.getUsadoEn());
+        }
+        if (USADO.equals(t.getEstado())) {
+            return Map.of(VALIDO, false, MOTIVO, "YA_USADO", USADO_EN, t.getUsadoEn());
+        }
+        return Map.of(VALIDO, false, MOTIVO, "TIQUETE_NO_VALIDO", ESTADO, t.getEstado());
     }
 
     private String sign(String content) {

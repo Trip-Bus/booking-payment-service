@@ -11,6 +11,7 @@ public record TicketResponse(
         UUID bookingId,
         String estado,
         Instant emitidoEn,
+        Instant usadoEn,
         UUID itineraryId,
         String origen,
         String destino,

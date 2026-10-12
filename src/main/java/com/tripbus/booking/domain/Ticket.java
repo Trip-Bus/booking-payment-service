@@ -31,6 +31,14 @@ public class Ticket {
     @Column(nullable = false)
     private String estado;
 
+    /** US-033: momento en que el QR se validó al abordar (null mientras no se haya usado). */
+    @Column(name = "usado_en")
+    private Instant usadoEn;
+
+    /** US-033: usuario (conductor u operador) que validó el QR. */
+    @Column(name = "usado_por")
+    private UUID usadoPor;
+
     protected Ticket() {
     }
 
@@ -65,5 +73,13 @@ public class Ticket {
 
     public String getEstado() {
         return estado;
+    }
+
+    public Instant getUsadoEn() {
+        return usadoEn;
+    }
+
+    public UUID getUsadoPor() {
+        return usadoPor;
     }
 }
