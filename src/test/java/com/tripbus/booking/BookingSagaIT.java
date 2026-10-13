@@ -9,6 +9,7 @@ import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.payment.PaymentGateway;
 import com.tripbus.booking.payment.WebhookSigner;
 import com.tripbus.booking.repository.TicketRepository;
+import com.tripbus.booking.service.PaymentService;
 import com.tripbus.booking.repository.WebhookLogRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
@@ -42,6 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -83,6 +86,10 @@ class BookingSagaIT {
     private WebhookLogRepository webhookLogs;
     @Autowired
     private TicketRepository tickets;
+    @Autowired
+    private PaymentService paymentService;
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @MockitoBean
     private SeatInventoryClient seatInventory;
@@ -95,12 +102,16 @@ class BookingSagaIT {
 
     private final UUID userId = UUID.randomUUID();
     private final UUID itineraryId = UUID.randomUUID();
+    private final UUID companyId = UUID.randomUUID();
 
     @BeforeEach
     void simularServicios() {
         reset(seatInventory, catalog, gateway);
         when(catalog.price(itineraryId)).thenReturn(
                 new CatalogClient.Price(itineraryId, new BigDecimal("95000"), "COP", "PROGRAMADO"));
+        when(catalog.itinerary(itineraryId)).thenReturn(new CatalogClient.ItinerarySummary(itineraryId, "Bogotá",
+                "Medellín", Instant.now().plusSeconds(86400), Instant.now().plusSeconds(90000), "Expreso Andino",
+                "ABC123", companyId));
         when(gateway.charge(any(), any(), anyString(), anyString()))
                 .thenAnswer(inv -> "sbx_" + UUID.randomUUID().toString().substring(0, 8));
     }
@@ -139,13 +150,20 @@ class BookingSagaIT {
                 .andReturn().getResponse().getContentAsString();
     }
 
-    private void webhook(String paymentId, String status) throws Exception {
+    private String webhook(String paymentId, String status) throws Exception {
+        return webhook(paymentId, status, 95000, "COP");
+    }
+
+    /** Webhook firmado; devuelve el "resultado" que responde el servicio (siempre 200 a la pasarela). */
+    private String webhook(String paymentId, String status, Object amount, String currency) throws Exception {
         String body = objectMapper.writeValueAsString(Map.of(
                 "eventId", "evt_" + UUID.randomUUID(), "reference", paymentId, "status", status,
-                "amount", 95000, "timestamp", Instant.now().toString()));
-        mvc.perform(post("/webhooks/payment").contentType(MediaType.APPLICATION_JSON)
+                "amount", amount, "currency", currency, "timestamp", Instant.now().toString()));
+        String response = mvc.perform(post("/webhooks/payment").contentType(MediaType.APPLICATION_JSON)
                         .header("X-Signature", signer.sign(body)).content(body))
-                .andExpect(status().isOk());
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return objectMapper.readTree(response).get("resultado").asText();
     }
 
     @Test
@@ -261,5 +279,91 @@ class BookingSagaIT {
         mvc.perform(get("/bookings/{id}", bookingId).with(jwt().jwt(j -> j.subject(UUID.randomUUID().toString()))))
                 .andExpect(status().isNotFound());
         mvc.perform(get("/bookings/{id}", bookingId)).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void webhookConMontoDistintoNoConfirmaYLiberaLaRetencion() throws Exception {
+        UUID holdId = nuevaRetencion();
+        UUID bookingId = UUID.fromString(crearReserva(holdId).get("bookingId").asText());
+        String paymentId = objectMapper.readTree(pagar(bookingId, "pago-monto-malo-1", "tok_visa_approved"))
+                .get("paymentId").asText();
+
+        // La pasarela dice haber cobrado 1.000 COP por una reserva de 95.000.
+        assertThat(webhook(paymentId, "APPROVED", 1000, "COP")).isEqualTo("MONTO_INCORRECTO");
+
+        verify(seatInventory, never()).confirmSale(any(), any());
+        verify(seatInventory).releaseHold(holdId, "MONTO_INCORRECTO");
+        mvc.perform(get("/bookings/{id}", bookingId).with(pasajero()))
+                .andExpect(jsonPath("$.estado").value("PAGO_RECHAZADO"))
+                .andExpect(jsonPath("$.pago.estado").value("RECHAZADO"))
+                .andExpect(jsonPath("$.pago.motivoRechazo").value("MONTO_INCORRECTO"))
+                .andExpect(jsonPath("$.ticketId").isEmpty());
+        assertThat(jdbc.queryForObject("select count(*) from webhook_log where resultado = 'MONTO_INCORRECTO'"
+                + " and payload like ?", Long.class, "%" + paymentId + "%")).isEqualTo(1);
+    }
+
+    @Test
+    void webhookConOtraMonedaTampocoAprueba() throws Exception {
+        UUID bookingId = UUID.fromString(crearReserva(nuevaRetencion()).get("bookingId").asText());
+        String paymentId = objectMapper.readTree(pagar(bookingId, "pago-moneda-mala", "tok_visa_approved"))
+                .get("paymentId").asText();
+
+        assertThat(webhook(paymentId, "APPROVED", "95000", "USD")).isEqualTo("MONTO_INCORRECTO");
+        mvc.perform(get("/bookings/{id}", bookingId).with(pasajero()))
+                .andExpect(jsonPath("$.estado").value("PAGO_RECHAZADO"));
+    }
+
+    @Test
+    void aprobadoDespuesDelTimeoutSeReembolsaUnaSolaVez() throws Exception {
+        UUID holdId = nuevaRetencion();
+        UUID bookingId = UUID.fromString(crearReserva(holdId).get("bookingId").asText());
+        String paymentId = objectMapper.readTree(pagar(bookingId, "pago-tardio-timeout", "tok_visa_approved"))
+                .get("paymentId").asText();
+        // SagaRecoveryJob: 5 minutos sin respuesta de la pasarela -> pago fallido y retención liberada.
+        paymentService.failPayment(UUID.fromString(paymentId), "SIN_RESPUESTA_DE_LA_PASARELA");
+
+        assertThat(webhook(paymentId, "APPROVED")).isEqualTo("APROBADO_TARDIO_REEMBOLSADO");
+        assertThat(webhook(paymentId, "APPROVED")).isEqualTo("DUPLICADO"); // la pasarela reintenta
+
+        verify(gateway, times(1)).refund(anyString(), any());
+        verify(seatInventory, never()).confirmSale(any(), any());
+        mvc.perform(get("/bookings/{id}", bookingId).with(pasajero()))
+                .andExpect(jsonPath("$.estado").value("PAGO_RECHAZADO"))
+                .andExpect(jsonPath("$.pago.estado").value("REEMBOLSADO"))
+                .andExpect(jsonPath("$.ticketId").isEmpty());
+        mvc.perform(get("/bookings/{id}/saga", bookingId).with(pasajero()))
+                .andExpect(jsonPath("$[?(@.paso == 'APROBADO_TARDIO_REEMBOLSADO')]").exists());
+        assertThat(jdbc.queryForObject("select count(*) from refunds where payment_id = ?", Long.class,
+                UUID.fromString(paymentId))).isEqualTo(1);
+    }
+
+    @Test
+    void operadorSoloVeLasReservasDeSuEmpresa() throws Exception {
+        UUID bookingId = UUID.fromString(crearReserva(nuevaRetencion()).get("bookingId").asText());
+
+        mvc.perform(get("/bookings/{id}", bookingId).with(operador(companyId))).andExpect(status().isOk());
+        mvc.perform(get("/bookings/{id}/saga", bookingId).with(operador(companyId))).andExpect(status().isOk());
+        // Otra empresa: 404, igual que si no existiera.
+        mvc.perform(get("/bookings/{id}", bookingId).with(operador(UUID.randomUUID())))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("BOOKING_NOT_FOUND"));
+        mvc.perform(get("/bookings/{id}/saga", bookingId).with(operador(UUID.randomUUID())))
+                .andExpect(status().isNotFound());
+        // Operador sin empresa en el token: tampoco.
+        mvc.perform(get("/bookings/{id}", bookingId).with(jwt()
+                        .jwt(j -> j.subject(UUID.randomUUID().toString()).claim("role", "OPERADOR"))
+                        .authorities(new SimpleGrantedAuthority("ROLE_OPERADOR"))))
+                .andExpect(status().isNotFound());
+        // ADMIN ve todas.
+        mvc.perform(get("/bookings/{id}", bookingId).with(jwt()
+                        .jwt(j -> j.subject(UUID.randomUUID().toString()).claim("role", "ADMIN"))
+                        .authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
+                .andExpect(status().isOk());
+    }
+
+    private RequestPostProcessor operador(UUID empresa) {
+        return jwt().jwt(j -> j.subject(UUID.randomUUID().toString()).claim("role", "OPERADOR")
+                        .claim("companyId", empresa.toString()))
+                .authorities(new SimpleGrantedAuthority("ROLE_OPERADOR"));
     }
 }

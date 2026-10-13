@@ -167,7 +167,7 @@ class TicketMailIT {
                 .andReturn().getResponse().getContentAsString();
         String body = objectMapper.writeValueAsString(Map.of(
                 "eventId", "evt_" + UUID.randomUUID(), "reference", objectMapper.readTree(pago).get("paymentId").asText(),
-                "status", "APPROVED", "amount", 95000, "timestamp", Instant.now().toString()));
+                "status", "APPROVED", "amount", 95000, "currency", "COP", "timestamp", Instant.now().toString()));
         mvc.perform(post("/webhooks/payment").contentType(MediaType.APPLICATION_JSON)
                         .header("X-Signature", signer.sign(body)).content(body))
                 .andExpect(status().isOk());

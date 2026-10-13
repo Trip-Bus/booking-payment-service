@@ -61,7 +61,7 @@ public class SagaRecoveryJob {
         for (UUID paymentId : paymentRepository.findIdsByEstadoAndCreadoEnBefore(
                 PaymentStatus.PENDIENTE, now.minus(Duration.ofMinutes(5)))) {
             log.warn("El pago {} no recibió respuesta de la pasarela; se marca como fallido", paymentId);
-            paymentService.failPayment(paymentId, "SIN_RESPUESTA_DE_LA_PASARELA");
+            paymentService.failPayment(paymentId, PaymentService.SIN_RESPUESTA);
         }
     }
 
