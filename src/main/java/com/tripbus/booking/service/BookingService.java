@@ -112,6 +112,10 @@ public class BookingService {
             precioUnitario = price.precioBase();
             moneda = price.moneda();
         }
+        // US-005: empresa del itinerario para la visibilidad del OPERADOR. Si catalog no responde la
+        // reserva se crea igual, sin empresa (solo la verán su dueño y ADMIN).
+        CatalogClient.ItinerarySummary itinerario = catalog.itinerary(hold.itineraryId());
+        UUID companyId = itinerario != null ? itinerario.companyId() : null;
 
         final String monedaFinal = moneda;
         try {
@@ -119,7 +123,7 @@ public class BookingService {
                 Instant now = clock.instant();
                 Booking booking = bookingRepository.save(new Booking(hold.holdId(), userId, hold.itineraryId(),
                         hold.offerId(), hold.seatNumbers(), precioUnitario, monedaFinal, hold.expiraEn(), emailContacto,
-                        now));
+                        companyId, now));
                 for (int i = 0; i < request.pasajeros().size(); i++) {
                     PassengerRequest p = request.pasajeros().get(i);
                     passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
@@ -145,12 +149,11 @@ public class BookingService {
     }
 
     @Transactional(readOnly = true)
-    public BookingResponse get(UUID bookingId, UUID requesterId, boolean staff) {
+    public BookingResponse get(UUID bookingId, BookingViewer viewer) {
+        // Si no la puede ver responde 404 igual que si no existiera: no se revela que existe.
         Booking booking = bookingRepository.findById(bookingId)
+                .filter(viewer::canSee)
                 .orElseThrow(() -> ApiException.notFound("BOOKING_NOT_FOUND", "La reserva no existe"));
-        if (!staff && !booking.getUserId().equals(requesterId)) {
-            throw ApiException.notFound("BOOKING_NOT_FOUND", "La reserva no existe");
-        }
         return toResponse(booking);
     }
 
@@ -160,8 +163,8 @@ public class BookingService {
     }
 
     @Transactional(readOnly = true)
-    public List<SagaStepResponse> sagaLog(UUID bookingId, UUID requesterId, boolean staff) {
-        get(bookingId, requesterId, staff);
+    public List<SagaStepResponse> sagaLog(UUID bookingId, BookingViewer viewer) {
+        get(bookingId, viewer);
         return sagaLogRepository.findByBookingIdOrderByIdAsc(bookingId).stream()
                 .map(s -> new SagaStepResponse(s.getPaso(), s.getEstado(), s.getPayload(), s.getCreadoEn()))
                 .toList();

@@ -32,6 +32,14 @@ retoma las sagas interrumpidas y otro concilia reservas/pagos/tiquetes cada 15 m
 No guarda números de tarjeta: recibe un **token** (y solo los últimos 4 dígitos).
 `tok_visa_approved` aprueba y `tok_visa_declined` rechaza. El resultado llega por webhook firmado
 (~1,5 s). Un webhook con firma inválida responde `401 INVALID_SIGNATURE` y queda en `webhook_log`.
+Un APPROVED cuyo `amount`/`currency` no coincide con el pago no se aprueba: queda `MONTO_INCORRECTO`
+en `webhook_log`, el pago se rechaza y se libera el asiento. Si la pasarela aprueba un pago que ya se
+había dado por fallido (sin respuesta a los 5 min o pasarela caída), se reembolsa una sola vez
+(`APROBADO_TARDIO_REEMBOLSADO` en `saga_log`).
+
+Las transiciones de estado de la reserva están validadas (`Booking.cambiarEstado`); una no permitida
+responde `409 INVALID_BOOKING_TRANSITION`. `GET /bookings/{id}` y `/saga`: el dueño ve las suyas, ADMIN
+todas y OPERADOR solo las de su empresa (claim `companyId`); otra empresa responde 404.
 
 La pasarela puede reenviar el mismo webhook para demostrar la idempotencia (US-034:
 `tripbus.payment.duplicate-webhook`): **encendido en QA** (`application-qa.yml`, para seguir
@@ -211,16 +219,15 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-09) | Mínimo |
+| Métrica | Medido (2026-10-12) | Mínimo |
 |---|---|---|
-| Líneas | 63,8 % | `jacoco.minimo.lineas` = 0.60 |
-| Ramas | 44,0 % | `jacoco.minimo.ramas` = 0.40 |
+| Líneas | 74,0 % | `jacoco.minimo.lineas` = 0.70 |
+| Ramas | 61,2 % | `jacoco.minimo.ramas` = 0.60 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
-actualiza la propiedad en el pom en el mismo PR. Ramas está por debajo del 60 % de referencia:
-las mejores candidatas para subirla son `RemoteErrors`, `GlobalExceptionHandler`, `SagaRecoveryJob`,
-`EventConsumer` y `CurrentUser`.
+actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para subir la cobertura son
+`RemoteErrors`, `SagaRecoveryJob` y `EventConsumer`.
 
 Fuera de la cobertura (mismas en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está lo que no tiene lógica: `BookingApplication`, los records de `web/dto` (ninguno tiene métodos),

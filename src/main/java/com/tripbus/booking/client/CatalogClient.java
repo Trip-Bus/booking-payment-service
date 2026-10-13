@@ -31,8 +31,14 @@ public class CatalogClient {
     public record Price(UUID itineraryId, BigDecimal precioBase, String moneda, String estado) {
     }
 
+    /** companyId: empresa dueña del itinerario (US-005, visibilidad del OPERADOR). */
     public record ItinerarySummary(UUID itineraryId, String origen, String destino, Instant fechaSalida,
-                                   Instant fechaLlegadaEstimada, String empresa, String placa) {
+                                   Instant fechaLlegadaEstimada, String empresa, String placa, UUID companyId) {
+
+        public ItinerarySummary(UUID itineraryId, String origen, String destino, Instant fechaSalida,
+                                Instant fechaLlegadaEstimada, String empresa, String placa) {
+            this(itineraryId, origen, destino, fechaSalida, fechaLlegadaEstimada, empresa, placa, null);
+        }
     }
 
     public Price price(UUID itineraryId) {
