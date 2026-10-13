@@ -2,10 +2,16 @@ spring:
   application:
     name: booking-payment-service
 
+  # "qa" y "prod" activan además el perfil "desplegado" (exige secretos, sin valores por defecto).
+  profiles:
+    group:
+      qa: desplegado
+      prod: desplegado
+
   datasource:
-    url: jdbc:postgresql://${DB_URL:localhost}:${DB_PORT:5432}/tripbus_booking
-    username: ${DB_USERNAME:tripbus}
-    password: ${DB_PASSWORD:tripbus_local_pw}
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:18104}/${DB_NAME:tripbus_booking}
+    username: ${DB_USERNAME:booking}
+    password: ${DB_PASSWORD:booking_qa_pw}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:10}
@@ -27,17 +33,18 @@ spring:
   data:
     redis:
       host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      port: ${REDIS_PORT:18100}
+      password: ${REDIS_PASSWORD:}
       timeout: 2s
 
   security:
     oauth2:
       resourceserver:
         jwt:
-          jwk-set-uri: ${IDENTITY_JWKS_URI:http://localhost:16001/.well-known/jwks.json}
+          jwk-set-uri: ${IDENTITY_JWKS_URI:http://localhost:18001/.well-known/jwks.json}
 
 server:
-  port: 16004
+  port: ${SERVER_PORT:18004}
   shutdown: graceful
 
 management:
@@ -52,9 +59,21 @@ management:
   metrics:
     tags:
       application: booking-payment-service
+  info:
+    env:
+      enabled: true
+  health:
+    # El SMTP del tiquete por correo (US-033) es opcional: su caída no debe sacar al servicio de rotación.
+    mail:
+      enabled: false
+
+# /actuator/info: commit con el que se construyó la imagen (build-arg GIT_COMMIT del Dockerfile).
+info:
+  app:
+    commit: ${APP_COMMIT:local}
 
 tripbus:
-  internal-token: ${INTERNAL_API_TOKEN:tripbus-internal-dev-token}
+  internal-token: ${INTERNAL_API_TOKEN:tripbus_internal_qa_token}
   events:
     enabled: ${EVENTS_ENABLED:true}
     consumer-enabled: ${EVENTS_CONSUMER_ENABLED:true}
@@ -62,14 +81,23 @@ tripbus:
     max-len: 100000
     group: booking-payment-service
   booking:
-    seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:16003}
-    catalog-url: ${CATALOG_URL:http://localhost:16002}
-    flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:16006}
+    seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:18003}
+    catalog-url: ${CATALOG_URL:http://localhost:18002}
+    flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:18006}
     idempotency-ttl: 24h
-    ticket-secret: ${TICKET_SECRET:tripbus-ticket-dev-secret}
+    ticket-secret: ${TICKET_SECRET:tripbus_ticket_qa_secret}
   payment:
-    webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:16004/webhooks/payment}
-    webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus-webhook-dev-secret}
+    webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:18004/webhooks/payment}
+    webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus_webhook_qa_secret}
     webhook-delay: 1500ms
     # Simula a la pasarela reenviando el mismo webhook (US-034: no debe cobrar ni emitir dos veces).
+    # application-qa.yml lo fija en true y application-prod.yml en false.
     duplicate-webhook: ${PAYMENT_DUPLICATE_WEBHOOK:true}
+  # US-033: el tiquete se envía por correo con el QR adjunto. Sin MAIL_HOST el envío queda deshabilitado
+  # (un WARN al arrancar); no es una variable obligatoria en ningún entorno.
+  mail:
+    host: ${MAIL_HOST:}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    from: "${MAIL_FROM:TripBus <no-reply@tripbus.co>}"

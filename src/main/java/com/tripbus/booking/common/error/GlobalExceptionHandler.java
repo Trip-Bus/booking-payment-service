@@ -1,5 +1,6 @@
 package com.tripbus.booking.common.error;
 
+import com.tripbus.booking.domain.InvalidBookingTransitionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -30,6 +31,15 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleApi(ApiException ex) {
         return ResponseEntity.status(ex.getStatus())
                 .body(ErrorResponse.of(ex.getCode(), ex.getMessage(), ex.getDetails()));
+    }
+
+    /** Un flujo intentó un cambio de estado de reserva no permitido (p. ej. por una carrera): 409. */
+    @ExceptionHandler(InvalidBookingTransitionException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidTransition(InvalidBookingTransitionException ex) {
+        log.warn("{}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ErrorResponse.of("INVALID_BOOKING_TRANSITION", "La reserva no admite esta operación en su estado actual",
+                        Map.<String, Object>of("desde", ex.getDesde().name(), "hacia", ex.getHacia().name())));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

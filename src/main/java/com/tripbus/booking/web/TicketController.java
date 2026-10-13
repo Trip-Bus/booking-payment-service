@@ -42,11 +42,12 @@ public class TicketController {
                 .body(ticketService.qrImage(id, CurrentUser.id(authentication), isStaff(authentication)));
     }
 
-    /** Validación del QR al abordar (conductor u operador). */
+    /** Validación del QR al abordar (conductor u operador): el QR solo se puede usar una vez. */
     @PostMapping("/validate")
     @PreAuthorize("hasAnyRole('CONDUCTOR', 'OPERADOR', 'ADMIN')")
-    public Map<String, Object> validate(@Valid @RequestBody ValidateTicketRequest request) {
-        return ticketService.validate(request.qrCode());
+    public Map<String, Object> validate(@Valid @RequestBody ValidateTicketRequest request,
+                                        Authentication authentication) {
+        return ticketService.validate(request.qrCode(), CurrentUser.id(authentication));
     }
 
     private static boolean isStaff(Authentication authentication) {

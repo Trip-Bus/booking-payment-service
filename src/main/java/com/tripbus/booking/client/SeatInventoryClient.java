@@ -1,6 +1,7 @@
 package com.tripbus.booking.client;
 
 import com.tripbus.booking.config.BookingProperties;
+import com.tripbus.booking.config.RequestIdPropagationInterceptor;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
@@ -28,6 +29,7 @@ public class SeatInventoryClient {
                 .baseUrl(properties.seatInventoryUrl())
                 .requestFactory(factory)
                 .defaultHeader("X-Internal-Token", token)
+                .requestInterceptor(new RequestIdPropagationInterceptor())
                 .build();
     }
 

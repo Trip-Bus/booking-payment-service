@@ -1,0 +1,10 @@
+# Perfil "qa": Docker Compose en el computador del desarrollador (activa también "desplegado").
+logging:
+  level:
+    com.tripbus: DEBUG
+
+tripbus:
+  payment:
+    # En QA la pasarela sandbox reenvía cada webhook: así se sigue probando que un webhook
+    # repetido no cobra ni emite el tiquete dos veces (US-034).
+    duplicate-webhook: true

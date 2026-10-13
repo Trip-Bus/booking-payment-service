@@ -1,0 +1,16 @@
+# Perfil "prod": servidor de producción (activa también "desplegado").
+logging:
+  level:
+    com.tripbus: INFO
+
+# Swagger/OpenAPI apagado en producción (solo IDE y QA).
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+tripbus:
+  payment:
+    # En PROD la pasarela no reenvía webhooks a propósito (el duplicado es solo una demostración de QA).
+    duplicate-webhook: false

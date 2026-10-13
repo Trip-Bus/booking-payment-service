@@ -2,6 +2,7 @@ package com.tripbus.booking.web;
 
 import com.tripbus.booking.common.security.CurrentUser;
 import com.tripbus.booking.service.BookingService;
+import com.tripbus.booking.service.BookingViewer;
 import com.tripbus.booking.service.IdempotencyService;
 import com.tripbus.booking.service.PaymentService;
 import com.tripbus.booking.web.dto.BookingResponse;
@@ -42,7 +43,8 @@ public class BookingController {
     @PostMapping
     public ResponseEntity<BookingResponse> create(@Valid @RequestBody CreateBookingRequest request,
                                                   Authentication authentication) {
-        BookingService.CreateResult result = bookingService.create(request, CurrentUser.id(authentication));
+        BookingService.CreateResult result = bookingService.create(request, CurrentUser.id(authentication),
+                CurrentUser.email(authentication));
         return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK).body(result.booking());
     }
 
@@ -53,13 +55,13 @@ public class BookingController {
 
     @GetMapping("/{id}")
     public BookingResponse get(@PathVariable UUID id, Authentication authentication) {
-        return bookingService.get(id, CurrentUser.id(authentication), isStaff(authentication));
+        return bookingService.get(id, BookingViewer.of(authentication));
     }
 
     /** Bitácora de la saga (útil para la demo y para soporte). */
     @GetMapping("/{id}/saga")
     public List<SagaStepResponse> saga(@PathVariable UUID id, Authentication authentication) {
-        return bookingService.sagaLog(id, CurrentUser.id(authentication), isStaff(authentication));
+        return bookingService.sagaLog(id, BookingViewer.of(authentication));
     }
 
     /** US-032 + US-034: pago con tarjeta. Requiere el header Idempotency-Key. */
@@ -73,9 +75,5 @@ public class BookingController {
                 request.cardBrand());
         return idempotencyService.execute(userId, idempotencyKey, requestHash, () ->
                 ResponseEntity.status(HttpStatus.ACCEPTED).body(paymentService.pay(id, userId, request, idempotencyKey)));
-    }
-
-    private static boolean isStaff(Authentication authentication) {
-        return CurrentUser.hasRole(authentication, "ADMIN") || CurrentUser.hasRole(authentication, "OPERADOR");
     }
 }

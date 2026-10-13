@@ -28,6 +28,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -59,6 +60,7 @@ public class PaymentService {
     private final PaymentGateway gateway;
     private final WebhookSigner signer;
     private final TicketService ticketService;
+    private final TicketMailService ticketMail;
     private final SagaLogger saga;
     private final EventPublisher events;
     private final TransactionTemplate tx;
@@ -68,8 +70,8 @@ public class PaymentService {
     public PaymentService(BookingRepository bookingRepository, PaymentRepository paymentRepository,
                           RefundRepository refundRepository, WebhookLogRepository webhookLogRepository,
                           SeatInventoryClient seatInventory, PaymentGateway gateway, WebhookSigner signer,
-                          TicketService ticketService, SagaLogger saga, EventPublisher events,
-                          TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
+                          TicketService ticketService, TicketMailService ticketMail, SagaLogger saga,
+                          EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
@@ -78,6 +80,7 @@ public class PaymentService {
         this.gateway = gateway;
         this.signer = signer;
         this.ticketService = ticketService;
+        this.ticketMail = ticketMail;
         this.saga = saga;
         this.events = events;
         this.tx = tx;
@@ -148,7 +151,7 @@ public class PaymentService {
             }));
         } catch (RuntimeException e) {
             log.error("La pasarela no aceptó el cobro de la reserva {}: {}", bookingId, e.getMessage());
-            failPayment(payment.getId(), "PASARELA_NO_DISPONIBLE");
+            failPayment(payment.getId(), PASARELA_NO_DISPONIBLE);
             throw ApiException.unavailable("PAYMENT_GATEWAY_UNAVAILABLE",
                     "La pasarela de pagos no está disponible; no se realizó ningún cobro");
         }
@@ -173,7 +176,15 @@ public class PaymentService {
 
     // ------------------------------------------------------------------ webhook
 
-    public enum WebhookOutcome { APROBADO, RECHAZADO, DUPLICADO, IGNORADO }
+    public enum WebhookOutcome { APROBADO, RECHAZADO, DUPLICADO, IGNORADO, MONTO_INCORRECTO, APROBADO_TARDIO_REEMBOLSADO }
+
+    /** Motivos con los que ESTE servicio da por fallido un pago sin respuesta de la pasarela. */
+    static final String SIN_RESPUESTA = "SIN_RESPUESTA_DE_LA_PASARELA";
+    static final String PASARELA_NO_DISPONIBLE = "PASARELA_NO_DISPONIBLE";
+    static final String MONTO_INCORRECTO = "MONTO_INCORRECTO";
+
+    private record WebhookResult(WebhookOutcome outcome, UUID bookingId) {
+    }
 
     /** US-034: el webhook es idempotente y tolerante a reintentos de la pasarela. */
     public WebhookOutcome handleWebhook(String rawBody, String signature) {
@@ -195,23 +206,26 @@ public class PaymentService {
         String status = event.path("status").asText("");
         String reason = event.path("reason").asText(null);
 
-        Object[] result = tx.execute(s -> {
+        WebhookResult result = tx.execute(s -> {
             UUID paymentId;
             try {
                 paymentId = UUID.fromString(reference);
             } catch (IllegalArgumentException e) {
-                return new Object[]{WebhookOutcome.IGNORADO, null};
+                return new WebhookResult(WebhookOutcome.IGNORADO, null);
             }
             Payment payment = paymentRepository.lockById(paymentId).orElse(null);
+            boolean otroCobro = payment != null && payment.getPaymentGatewayId() != null && gatewayId != null
+                    && !payment.getPaymentGatewayId().equals(gatewayId);
             WebhookOutcome outcome;
             UUID bookingId = null;
-            if (payment == null) {
+            if (payment == null || otroCobro) {
                 outcome = WebhookOutcome.IGNORADO;
+            } else if (esAprobadoTardio(payment, status)) {
+                bookingId = payment.getBookingId();
+                refundLateApproval(payment, gatewayId, montoDelEvento(event));
+                outcome = WebhookOutcome.APROBADO_TARDIO_REEMBOLSADO;
             } else if (payment.getEstado() != PaymentStatus.PENDIENTE) {
                 outcome = WebhookOutcome.DUPLICADO;
-            } else if (payment.getPaymentGatewayId() != null && gatewayId != null
-                    && !payment.getPaymentGatewayId().equals(gatewayId)) {
-                outcome = WebhookOutcome.IGNORADO;
             } else {
                 Instant now = clock.instant();
                 Booking booking = bookingRepository.lockById(payment.getBookingId()).orElseThrow();
@@ -219,7 +233,16 @@ public class PaymentService {
                 if (payment.getPaymentGatewayId() == null && gatewayId != null) {
                     payment.asignarGatewayId(gatewayId, now);
                 }
-                if ("APPROVED".equals(status)) {
+                if ("APPROVED".equals(status) && !montoCoincide(event, payment, booking)) {
+                    // US-032: nunca se aprueba un cobro por un monto o moneda distintos al de la reserva.
+                    log.warn("Webhook {} del pago {}: monto/moneda {} {} no coinciden con {} {}; se rechaza",
+                            eventId, payment.getId(), event.path("amount").asText(""),
+                            event.path("currency").asText(""), payment.getMonto(), booking.getMoneda());
+                    payment.rechazar(MONTO_INCORRECTO, now);
+                    booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+                    publishPaymentFailed(booking, MONTO_INCORRECTO);
+                    outcome = WebhookOutcome.MONTO_INCORRECTO;
+                } else if ("APPROVED".equals(status)) {
                     payment.aprobar(now);
                     booking.cambiarEstado(BookingStatus.PAGO_APROBADO, now);
                     Map<String, Object> payload = new LinkedHashMap<>();
@@ -239,17 +262,79 @@ public class PaymentService {
                 }
             }
             webhookLogRepository.save(new WebhookLog(eventId, rawBody, signature, true, outcome.name(), clock.instant()));
-            return new Object[]{outcome, bookingId};
+            return new WebhookResult(outcome, bookingId);
         });
 
-        WebhookOutcome outcome = (WebhookOutcome) Objects.requireNonNull(result)[0];
-        UUID bookingId = (UUID) result[1];
+        WebhookOutcome outcome = Objects.requireNonNull(result).outcome();
+        UUID bookingId = result.bookingId();
         if (outcome == WebhookOutcome.APROBADO) {
             confirmAndIssue(bookingId);
-        } else if (outcome == WebhookOutcome.RECHAZADO) {
-            bookingRepository.findById(bookingId).ifPresent(b -> releaseHoldQuietly(b.getHoldId(), "PAGO_RECHAZADO"));
+        } else if (outcome == WebhookOutcome.RECHAZADO || outcome == WebhookOutcome.MONTO_INCORRECTO) {
+            String motivo = outcome == WebhookOutcome.RECHAZADO ? "PAGO_RECHAZADO" : MONTO_INCORRECTO;
+            bookingRepository.findById(bookingId).ifPresent(b -> releaseHoldQuietly(b.getHoldId(), motivo));
         }
         return outcome;
+    }
+
+    /**
+     * US-035: la pasarela aprueba un cobro que este servicio ya había dado por fallido (sin respuesta a
+     * los 5 min, o pasarela caída al cobrar). El asiento ya se liberó, así que el cobro se reembolsa.
+     */
+    private static boolean esAprobadoTardio(Payment payment, String status) {
+        return "APPROVED".equals(status) && payment.getEstado() == PaymentStatus.RECHAZADO
+                && (SIN_RESPUESTA.equals(payment.getMotivoRechazo())
+                || PASARELA_NO_DISPONIBLE.equals(payment.getMotivoRechazo()));
+    }
+
+    /**
+     * Reembolso de un aprobado tardío (dentro de la transacción del webhook, con el pago bloqueado).
+     * Idempotente: el pago pasa a REEMBOLSADO, así que un segundo webhook igual llega como DUPLICADO.
+     * Se reembolsa lo que la pasarela dice haber cobrado (el evento está firmado); si no lo trae, el monto del pago.
+     */
+    private void refundLateApproval(Payment payment, String gatewayId, BigDecimal montoCobrado) {
+        if (refundRepository.findByPaymentId(payment.getId()).isPresent()) {
+            return;
+        }
+        Instant now = clock.instant();
+        if (payment.getPaymentGatewayId() == null && gatewayId != null) {
+            payment.asignarGatewayId(gatewayId, now);
+        }
+        BigDecimal monto = montoCobrado != null ? montoCobrado : payment.getMonto();
+        log.warn("Pago {} aprobado por la pasarela después de darlo por fallido ({}): se reembolsa {}",
+                payment.getId(), payment.getMotivoRechazo(), monto);
+        gateway.refund(payment.getPaymentGatewayId(), monto);
+        Refund refund = refundRepository.save(new Refund(payment.getId(), monto, "APROBADO_TARDIO", now));
+        payment.reembolsar(now);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("bookingId", payment.getBookingId());
+        payload.put("paymentId", payment.getId());
+        payload.put("refundId", refund.getId());
+        payload.put("monto", refund.getMonto());
+        saga.log(payment.getBookingId(), "APROBADO_TARDIO_REEMBOLSADO", "OK", payload);
+        events.publishAfterCommit(BookingEvents.REFUND_PROCESSED, payload);
+    }
+
+    /** El webhook trae exactamente el monto del pago y la moneda de la reserva. */
+    static boolean montoCoincide(JsonNode event, Payment payment, Booking booking) {
+        BigDecimal monto = montoDelEvento(event);
+        String moneda = event.path("currency").asText(null);
+        return monto != null && monto.compareTo(payment.getMonto()) == 0
+                && moneda != null && moneda.equalsIgnoreCase(booking.getMoneda());
+    }
+
+    static BigDecimal montoDelEvento(JsonNode event) {
+        JsonNode amount = event.path("amount");
+        if (amount.isNumber()) {
+            return amount.decimalValue();
+        }
+        if (amount.isTextual()) {
+            try {
+                return new BigDecimal(amount.asText().trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------ continuación de la saga
@@ -294,6 +379,8 @@ public class PaymentService {
             payload.put("offerId", b.getOfferId());
             saga.log(bookingId, "TIQUETE_EMITIDO", "OK", Map.of("ticketId", ticket.getId()));
             events.publishAfterCommit(BookingEvents.TICKET_ISSUED, payload);
+            // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
+            ticketMail.sendAfterCommit(ticket.getId());
         });
     }
 

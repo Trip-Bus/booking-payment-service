@@ -31,6 +31,22 @@ public class Ticket {
     @Column(nullable = false)
     private String estado;
 
+    /** US-033: momento en que el QR se validó al abordar (null mientras no se haya usado). */
+    @Column(name = "usado_en")
+    private Instant usadoEn;
+
+    /** US-033: usuario (conductor u operador) que validó el QR. */
+    @Column(name = "usado_por")
+    private UUID usadoPor;
+
+    /** US-033: momento en que el tiquete se envió por correo al comprador (null mientras no se haya enviado). */
+    @Column(name = "notificado_en")
+    private Instant notificadoEn;
+
+    /** US-033: envíos por correo fallidos; el job de reintento deja de intentarlo al llegar a 5. */
+    @Column(name = "intentos_notificacion", nullable = false)
+    private int intentosNotificacion;
+
     protected Ticket() {
     }
 
@@ -65,5 +81,21 @@ public class Ticket {
 
     public String getEstado() {
         return estado;
+    }
+
+    public Instant getUsadoEn() {
+        return usadoEn;
+    }
+
+    public UUID getUsadoPor() {
+        return usadoPor;
+    }
+
+    public Instant getNotificadoEn() {
+        return notificadoEn;
+    }
+
+    public int getIntentosNotificacion() {
+        return intentosNotificacion;
     }
 }

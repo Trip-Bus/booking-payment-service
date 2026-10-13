@@ -76,8 +76,9 @@ public class BookingService {
     /**
      * US-031 (pasos 1-3 de la saga): valida la retención con Seat Inventory, calcula el
      * total (Catalog o Flash Offers) y registra la reserva con los datos del viajero.
+     * {@code emailContacto} (claim "email" del JWT, puede ser null) es a donde se enviará el tiquete.
      */
-    public CreateResult create(CreateBookingRequest request, UUID userId) {
+    public CreateResult create(CreateBookingRequest request, UUID userId, String emailContacto) {
         var existing = bookingRepository.findByHoldId(request.holdId());
         if (existing.isPresent()) {
             return new CreateResult(existingFor(existing.get(), userId), false);
@@ -111,13 +112,18 @@ public class BookingService {
             precioUnitario = price.precioBase();
             moneda = price.moneda();
         }
+        // US-005: empresa del itinerario para la visibilidad del OPERADOR. Si catalog no responde la
+        // reserva se crea igual, sin empresa (solo la verán su dueño y ADMIN).
+        CatalogClient.ItinerarySummary itinerario = catalog.itinerary(hold.itineraryId());
+        UUID companyId = itinerario != null ? itinerario.companyId() : null;
 
         final String monedaFinal = moneda;
         try {
             BookingResponse response = tx.execute(status -> {
                 Instant now = clock.instant();
                 Booking booking = bookingRepository.save(new Booking(hold.holdId(), userId, hold.itineraryId(),
-                        hold.offerId(), hold.seatNumbers(), precioUnitario, monedaFinal, hold.expiraEn(), now));
+                        hold.offerId(), hold.seatNumbers(), precioUnitario, monedaFinal, hold.expiraEn(), emailContacto,
+                        companyId, now));
                 for (int i = 0; i < request.pasajeros().size(); i++) {
                     PassengerRequest p = request.pasajeros().get(i);
                     passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
@@ -143,12 +149,11 @@ public class BookingService {
     }
 
     @Transactional(readOnly = true)
-    public BookingResponse get(UUID bookingId, UUID requesterId, boolean staff) {
+    public BookingResponse get(UUID bookingId, BookingViewer viewer) {
+        // Si no la puede ver responde 404 igual que si no existiera: no se revela que existe.
         Booking booking = bookingRepository.findById(bookingId)
+                .filter(viewer::canSee)
                 .orElseThrow(() -> ApiException.notFound("BOOKING_NOT_FOUND", "La reserva no existe"));
-        if (!staff && !booking.getUserId().equals(requesterId)) {
-            throw ApiException.notFound("BOOKING_NOT_FOUND", "La reserva no existe");
-        }
         return toResponse(booking);
     }
 
@@ -158,8 +163,8 @@ public class BookingService {
     }
 
     @Transactional(readOnly = true)
-    public List<SagaStepResponse> sagaLog(UUID bookingId, UUID requesterId, boolean staff) {
-        get(bookingId, requesterId, staff);
+    public List<SagaStepResponse> sagaLog(UUID bookingId, BookingViewer viewer) {
+        get(bookingId, viewer);
         return sagaLogRepository.findByBookingIdOrderByIdAsc(bookingId).stream()
                 .map(s -> new SagaStepResponse(s.getPaso(), s.getEstado(), s.getPayload(), s.getCreadoEn()))
                 .toList();
