@@ -90,23 +90,40 @@ public class RescheduleService {
      */
     public BookingService.CreateResult reschedule(UUID bookingId, UUID holdId, BookingViewer viewer,
                                                   String emailContacto) {
-        Booking origen = propia(bookingId, viewer);
+        return reprogramar(propia(bookingId, viewer), holdId, viewer, emailContacto, Modo.VOLUNTARIA);
+    }
+
+    /**
+     * US-154/US-155: reprogramación gratis de una reserva afectada por la empresa. Mismo flujo, pero sin
+     * diferencia ni cargo, sin el límite de cambios, sin el plazo de 3 h y sin exigir la misma empresa (sí el
+     * mismo origen y destino). Quien llama ya validó que la reserva está afectada y es de {@code viewer}.
+     */
+    public BookingService.CreateResult rescheduleAffected(Booking origen, UUID holdId, BookingViewer viewer) {
+        return reprogramar(origen, holdId, viewer, null, Modo.AFECTADA);
+    }
+
+    /** VOLUNTARIA: decisión del pasajero (US-150). AFECTADA: la empresa cambió el viaje (US-154). */
+    enum Modo { VOLUNTARIA, AFECTADA }
+
+    private BookingService.CreateResult reprogramar(Booking origen, UUID holdId, BookingViewer viewer,
+                                                    String emailContacto, Modo modo) {
         Booking existente = bookingRepository.findByHoldId(holdId).orElse(null);
         if (existente != null) {
             return yaCreada(origen, existente, viewer, "HOLD_ALREADY_USED", "La retención ya fue usada en otra reserva");
         }
 
-        CatalogClient.ItinerarySummary viajeOriginal = validarOrigen(origen);
+        CatalogClient.ItinerarySummary viajeOriginal = validarOrigen(origen, modo);
         List<Passenger> pasajeros = pasajerosEnOrden(origen);
         SeatInventoryClient.Hold hold = validarRetencion(origen, holdId, pasajeros.size());
-        validarViajeNuevo(viajeOriginal, origen, hold);
+        validarViajeNuevo(viajeOriginal, origen, hold, modo);
 
         BookingService.Precio precio = bookingService.precio(hold, origen.getUserId());
         if (!origen.getMoneda().equalsIgnoreCase(precio.moneda())) {
             throw ApiException.conflict("CURRENCY_MISMATCH", "El viaje nuevo se vende en otra moneda");
         }
         BigDecimal pasajeNuevo = precio.unitario().multiply(BigDecimal.valueOf(hold.seatNumbers().size()));
-        BigDecimal diferencia = diferencia(pasajeNuevo, origen.getValorPagado(), properties.rescheduleFee());
+        BigDecimal diferencia = modo == Modo.AFECTADA ? BigDecimal.ZERO
+                : diferencia(pasajeNuevo, origen.getValorPagado(), properties.rescheduleFee());
         BigDecimal valorPagado = pasajeNuevo.max(origen.getValorPagado());
         String email = emailContacto != null ? emailContacto : origen.getEmailContacto();
 
@@ -152,8 +169,11 @@ public class RescheduleService {
         return new BookingService.CreateResult(bookingService.get(existente.getId(), viewer), false);
     }
 
-    /** Reserva CONFIRMADA con tiquete EMITIDO, dentro del límite de cambios y del plazo. Devuelve su viaje. */
-    private CatalogClient.ItinerarySummary validarOrigen(Booking origen) {
+    /**
+     * Reserva CONFIRMADA con tiquete EMITIDO y sin otra reprogramación viva; si es VOLUNTARIA, además dentro del
+     * límite de cambios y del plazo. Devuelve su viaje.
+     */
+    private CatalogClient.ItinerarySummary validarOrigen(Booking origen, Modo modo) {
         if (origen.getEstado() != BookingStatus.CONFIRMADA) {
             throw new ApiException(HttpStatus.CONFLICT, "BOOKING_NOT_RESCHEDULABLE",
                     "Solo se puede reprogramar una reserva confirmada", Map.of(ESTADO, origen.getEstado().name()));
@@ -163,8 +183,7 @@ public class RescheduleService {
             throw new ApiException(HttpStatus.CONFLICT, "TICKET_NOT_RESCHEDULABLE",
                     "El tiquete ya no se puede reprogramar", Map.of(ESTADO, String.valueOf(estadoTiquete)));
         }
-        int hechas = reprogramaciones(origen);
-        if (hechas >= properties.maxReschedules()) {
+        if (modo == Modo.VOLUNTARIA && reprogramaciones(origen) >= properties.maxReschedules()) {
             throw new ApiException(HttpStatus.CONFLICT, "RESCHEDULE_LIMIT_REACHED",
                     "El tiquete ya se reprogramó el máximo de veces permitido",
                     Map.of("maximo", properties.maxReschedules()));
@@ -176,7 +195,8 @@ public class RescheduleService {
         if (viaje == null || viaje.fechaSalida() == null) {
             throw ApiException.unavailable(CATALOG_UNAVAILABLE, "No se pudo consultar el viaje; intenta de nuevo");
         }
-        if (!viaje.fechaSalida().isAfter(clock.instant().plus(properties.rescheduleCutoff()))) {
+        if (modo == Modo.VOLUNTARIA
+                && !viaje.fechaSalida().isAfter(clock.instant().plus(properties.rescheduleCutoff()))) {
             throw new ApiException(HttpStatus.CONFLICT, "RESCHEDULE_WINDOW_CLOSED",
                     "Ya no se puede reprogramar: faltan menos de " + properties.rescheduleCutoff().toHours()
                             + " h para la salida", Map.of("fechaSalida", viaje.fechaSalida().toString()));
@@ -215,9 +235,12 @@ public class RescheduleService {
         return hold;
     }
 
-    /** Viaje nuevo programado, en el futuro, con el mismo origen y destino y de la misma empresa. */
+    /**
+     * Viaje nuevo programado, en el futuro y con el mismo origen y destino; en una VOLUNTARIA, además de la misma
+     * empresa (en una AFECTADA puede ser de cualquiera).
+     */
     private void validarViajeNuevo(CatalogClient.ItinerarySummary original, Booking origen,
-                                   SeatInventoryClient.Hold hold) {
+                                   SeatInventoryClient.Hold hold, Modo modo) {
         CatalogClient.ItinerarySummary nuevo = catalog.itinerary(hold.itineraryId());
         if (nuevo == null) {
             throw ApiException.unavailable(CATALOG_UNAVAILABLE, "No se pudo consultar el viaje nuevo; intenta de nuevo");
@@ -230,6 +253,9 @@ public class RescheduleService {
         }
         if (!mismoTexto(original.origen(), nuevo.origen()) || !mismoTexto(original.destino(), nuevo.destino())) {
             throw ApiException.conflict("ROUTE_MISMATCH", "El viaje nuevo debe tener el mismo origen y destino");
+        }
+        if (modo == Modo.AFECTADA) {
+            return;
         }
         UUID empresa = original.companyId() != null ? original.companyId() : origen.getCompanyId();
         if (empresa == null || !empresa.equals(nuevo.companyId())) {

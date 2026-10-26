@@ -44,6 +44,24 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
             + "t.intentosNotificacion = 0 WHERE t.id = :id AND t.estado = 'EMITIDO'")
     int reemplazarQr(@Param("id") UUID id, @Param("qrCode") String qrCode, @Param("qrToken") String qrToken);
 
+    /**
+     * US-154/US-155: el tiquete de una reserva afectada que se reembolsa pasa a ANULADO, solo si sigue EMITIDO
+     * (compite con el abordaje sobre la misma fila).
+     */
+    @Modifying(flushAutomatically = true)
+    @Query("UPDATE Ticket t SET t.estado = 'ANULADO' WHERE t.id = :id AND t.estado = 'EMITIDO'")
+    int anular(@Param("id") UUID id);
+
+    /**
+     * US-172: pasajeros del viaje con tiquete EMITIDO (pendiente de abordar) o USADO (abordó). Los REPROGRAMADO y
+     * ANULADO no van en el manifiesto.
+     */
+    @Query("select new com.tripbus.booking.repository.ManifestRow(p.nombre, p.tipoDocumento, p.numeroDocumento, "
+            + "p.asiento, b.id, t.estado, t.usadoEn) from Passenger p, Booking b, Ticket t "
+            + "where p.bookingId = b.id and t.bookingId = b.id and b.itineraryId = :itineraryId "
+            + "and t.estado in ('EMITIDO', 'USADO')")
+    List<ManifestRow> findManifest(@Param("itineraryId") UUID itineraryId);
+
     /** US-033: el tiquete se envió por correo (solo la primera vez cuenta). */
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)

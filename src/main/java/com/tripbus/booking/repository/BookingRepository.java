@@ -37,4 +37,16 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
     @Query("select b.id from Booking b where b.estado = com.tripbus.booking.domain.BookingStatus.REPROGRAMADA "
             + "and b.anulacionResueltaEn is null and b.actualizadoEn < :antes order by b.actualizadoEn")
     List<UUID> findIdsConAnulacionPendiente(@Param("antes") Instant antes);
+
+    /** US-154: reservas CONFIRMADA del viaje cuyo tiquete sigue EMITIDO (afectadas por un cambio de la empresa). */
+    @Query("select b from Booking b, Ticket t where t.bookingId = b.id and b.itineraryId = :itineraryId "
+            + "and b.estado = com.tripbus.booking.domain.BookingStatus.CONFIRMADA and t.estado = 'EMITIDO'")
+    List<Booking> findConfirmadasConTiqueteEmitido(@Param("itineraryId") UUID itineraryId);
+
+    /** US-155: la reprogramación más reciente de {@code origenBookingId}. */
+    Optional<Booking> findFirstByOrigenBookingIdOrderByCreadoEnDesc(UUID origenBookingId);
+
+    /** US-172: empresa del viaje según sus reservas (si catalog no responde). */
+    @Query("select distinct b.companyId from Booking b where b.itineraryId = :itineraryId and b.companyId is not null")
+    List<UUID> findCompanyIdsByItineraryId(@Param("itineraryId") UUID itineraryId);
 }

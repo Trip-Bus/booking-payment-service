@@ -25,7 +25,8 @@ public class Booking {
 
     /**
      * Transiciones permitidas de la saga de compra. Los estados finales (PAGO_RECHAZADO, EXPIRADA,
-     * REEMBOLSADA, REPROGRAMADA) no tienen salida; CONFIRMADA solo sale por una reprogramación (US-150).
+     * REEMBOLSADA, REPROGRAMADA) no tienen salida; CONFIRMADA solo sale por una reprogramación (US-150)
+     * o por el reembolso de una reserva afectada por la empresa (US-154/US-155).
      */
     private static final Map<BookingStatus, Set<BookingStatus>> TRANSICIONES = new EnumMap<>(BookingStatus.class);
 
@@ -39,8 +40,9 @@ public class Booking {
         TRANSICIONES.put(BookingStatus.PAGO_EN_PROCESO, EnumSet.of(BookingStatus.PAGO_APROBADO, BookingStatus.PAGO_RECHAZADO));
         // Asiento confirmado y tiquete emitido, o el asiento se perdió y se reembolsa.
         TRANSICIONES.put(BookingStatus.PAGO_APROBADO, EnumSet.of(BookingStatus.CONFIRMADA, BookingStatus.REEMBOLSADA));
-        // US-150: se confirmó la reserva nueva que la reemplaza.
-        TRANSICIONES.put(BookingStatus.CONFIRMADA, EnumSet.of(BookingStatus.REPROGRAMADA));
+        // US-150: se confirmó la reserva nueva que la reemplaza. US-154/US-155: la empresa canceló o cambió el
+        // viaje y se reembolsa (AffectedBookingService es el único que lo hace: no hay reembolso voluntario).
+        TRANSICIONES.put(BookingStatus.CONFIRMADA, EnumSet.of(BookingStatus.REPROGRAMADA, BookingStatus.REEMBOLSADA));
     }
 
     @Id

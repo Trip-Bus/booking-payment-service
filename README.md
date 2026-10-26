@@ -7,7 +7,7 @@ idempotencia y saga de compra con compensaciones.
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Redis 7
 
-**HU:** US-031, US-032, US-033, US-034, US-150, US-139, US-152 · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
+**HU:** US-031, US-032, US-033, US-034, US-150, US-139, US-152, US-154, US-155, US-172 · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
 
 ## API
 
@@ -21,6 +21,9 @@ idempotencia y saga de compra con compensaciones.
 | POST | `/tickets/validate` `{qrCode}` | Validación al abordar (CONDUCTOR/OPERADOR/ADMIN). |
 | POST | `/tickets/{id}/seat` `{fromSeat, toSeat}` | **US-139** (dueño): cambia de asiento en el mismo viaje; el tiquete queda con QR nuevo. |
 | PATCH | `/tickets/{id}/passengers/{passengerId}` `{nombre, tipoDocumento, numeroDocumento}` | **US-152** (dueño): corrige el nombre o el documento de un pasajero, una sola vez. |
+| GET | `/bookings/affected` · `/bookings/{id}/affected` | **US-154**: mis reservas afectadas pendientes y el detalle (causa, opciones, plazo, decisión). |
+| POST | `/bookings/{id}/affected/reschedule` `{holdId}` · `/affected/refund` · `/affected/accept` | **US-154** (dueño): reprogramar gratis, reembolso o aceptar el nuevo horario. |
+| GET | `/itineraries/{id}/manifest` `?format=csv` | **US-172**: manifiesto de pasajeros (ADMIN, OPERADOR/CONDUCTOR de la empresa). |
 | POST | `/webhooks/payment` | Webhook de la pasarela (firma `X-Signature` HMAC-SHA256, **sin JWT**). |
 
 `pasajeros[].passengerId` (en la reserva y en el tiquete) es el que usa el PATCH. `BookingResponse.origenBookingId`
@@ -106,8 +109,70 @@ probando que un webhook repetido no cobra ni emite dos veces) y **apagado en PRO
 
 **Publica:** `BookingCreated`, `PaymentApproved`, `PaymentFailed`, `TicketIssued`, `RefundProcessed`,
 `TicketRescheduled` `{userId, bookingIdAnterior, bookingIdNuevo, ticketIdAnterior, ticketIdNuevo, itineraryIdAnterior,
-itineraryIdNuevo}` (US-150) y `TicketUpdated` `{userId, bookingId, ticketId, cambio: ASIENTO | PASAJERO}` (US-139 con
-`fromSeat`/`toSeat`, US-152 con `passengerId`). **Consume:** `HoldExpired`.
+itineraryIdNuevo}` (US-150), `TicketUpdated` `{userId, bookingId, ticketId, cambio: ASIENTO | PASAJERO}` (US-139 con
+`fromSeat`/`toSeat`, US-152 con `passengerId`), `BookingAffected` `{userId, bookingId, ticketId, itineraryId, causa,
+plazoDecision, opciones}` (US-154) y `BookingRelocated` `{userId, bookingIdAnterior, bookingIdNuevo, ticketIdAnterior,
+ticketIdNuevo, itineraryIdAnterior, itineraryIdNuevo, seatNumbers}` (US-155).
+**Consume:** `HoldExpired` (seat-inventory), `ItineraryCancelled` e `ItineraryRescheduled` (catalog). Idempotente por
+`eventId`: `processed_events` se escribe en la misma transacción que el manejador, así un evento repetido no vuelve a
+afectar reservas ni a avisar al pasajero.
+
+### Política de reembolso
+
+**Solo hay reembolso cuando el pasajero no tiene la culpa**: la empresa canceló, reprogramó o retrasó (≥ umbral) el
+viaje. Por decisión propia no existe (reprogramar con US-150 nunca devuelve dinero). El reembolso solo se puede pedir
+sobre una reserva afectada (`/bookings/{id}/affected/refund`); sobre cualquier otra responde `404 BOOKING_NOT_AFFECTED`.
+Las otras devoluciones automáticas siguen siendo las de la saga de compra (asiento perdido tras el pago y aprobado
+tardío), que tampoco son culpa del pasajero.
+
+### Viajes afectados por la empresa (US-154) y decisión automática (US-155)
+
+| Evento de catalog | Causa | Afecta |
+|---|---|---|
+| `ItineraryCancelled` | `CANCELACION` | siempre |
+| `ItineraryRescheduled` tipo `REPROGRAMACION` | `REPROGRAMACION` | siempre |
+| `ItineraryRescheduled` tipo `RETRASO` | `RETRASO` | si `minutosDiferencia >= tripbus.booking.affected-delay-min` (60); un retraso menor no afecta a nadie |
+
+Quedan afectadas las reservas `CONFIRMADA` del viaje con tiquete `EMITIDO` (no usado): una fila en `affected_bookings`
+`PENDIENTE` con `plazo_decision = ahora + tripbus.booking.affected-decision-window` (24 h), un correo al pasajero (qué
+pasó, qué puede elegir y hasta cuándo; mismo SMTP que el tiquete) y el evento `BookingAffected`. Si la empresa vuelve
+a cambiar el viaje y la reserva sigue confirmada, se reabre con la causa nueva (una cancelación pendiente no se
+reemplaza por un cambio posterior).
+
+| Causa | Opciones del dueño |
+|---|---|
+| `CANCELACION` | reprogramar gratis o reembolso |
+| `REPROGRAMACION` / `RETRASO` | aceptar el nuevo horario, reprogramar gratis o reembolso |
+
+- **Aceptar** (`/accept`): el tiquete sigue válido con el nuevo horario → `ACEPTO_CAMBIO`. Con el viaje cancelado,
+  `409 OPTION_NOT_AVAILABLE`.
+- **Reprogramar gratis** (`/reschedule {holdId}`): el flujo de US-150 con diferencia 0 (sin cargo), sin el límite de
+  cambios ni el plazo de 3 h, con el mismo origen y destino y de cualquier empresa → `REPROGRAMADA` (`bookingNuevoId`).
+- **Reembolso** (`/refund`): devuelve con `PaymentGateway.refund` todo lo pagado en la cadena de reprogramaciones, una
+  sola vez (`refunds` es único por pago; repetirlo responde `200` con el mismo resultado). El tiquete pasa a `ANULADO`
+  y la reserva a `REEMBOLSADA` en la misma transacción; si el viaje no fue cancelado se anulan los asientos con
+  seat-inventory `/internal/sales/void` (motivo `REEMBOLSO`, se reintenta si no responde). Publica `RefundProcessed`.
+- Una reserva ya decidida responde `409 ALREADY_DECIDED`; con el plazo vencido, `409 DECISION_WINDOW_CLOSED` (decide
+  el sistema). Solo decide el dueño: OPERADOR (su empresa) y ADMIN consultan `/affected` pero reciben `403`.
+
+**Al vencer el plazo** (`AffectedBookingJob`, cada 5 min en un solo nodo con `LeaderLock`), `decidido_por = SISTEMA`:
+`REPROGRAMACION`/`RETRASO` → `ACEPTO_CAMBIO`. `CANCELACION` → busca en catalog (`/trips/search`, día por día) el
+siguiente viaje de la misma ruta y empresa que salga después del original y dentro de los 3 días siguientes con cupo
+para todos los pasajeros, retiene los primeros asientos disponibles (`GET /seats/itineraries/{id}` y
+`POST /internal/holds` a nombre del pasajero) y confirma con el flujo gratis → `REUBICADA` + `BookingRelocated`; si no
+hay cupo → reembolso automático (`REEMBOLSADA` + `RefundProcessed`). Si catalog o seat-inventory no responden no se
+concluye "sin cupo": se reintenta en la siguiente pasada. Si el pasajero ya resolvió por su cuenta (reprogramó con
+US-150 o abordó) se registra como su decisión. En todos los casos se le avisa por correo.
+
+### Manifiesto de pasajeros (US-172)
+
+`GET /itineraries/{id}/manifest` (`?format=csv` para CSV): ADMIN, y OPERADOR o CONDUCTOR de la empresa del viaje (claim
+`companyId`; la validación contra la asignación de fleet llega después). Otra empresa → `404 ITINERARY_NOT_FOUND`;
+otro rol → `403`. Por pasajero: nombre, tipo y número de documento, asiento, `bookingId`, estado del tiquete
+(`EMITIDO` = pendiente de abordar, `USADO` = abordó) y hora de abordaje; totales `vendidos`, `abordados` y
+`pendientes`. No incluye tiquetes `REPROGRAMADO` ni `ANULADO`. Es información personal: cada consulta (quién, rol,
+cuándo, qué viaje, formato y si se permitió) queda en `manifest_access_log`. El CSV escapa comas y comillas y
+antepone `'` a los valores que empiezan por `= + - @` (inyección de fórmulas).
 
 ## Flujo de ramas y entornos
 
@@ -269,6 +334,12 @@ mvn -B verify      # unitarias + integración con PostgreSQL y Redis reales (Tes
   si se aborda con el viejo antes de pagar o con dos reprogramaciones simultáneas); pago rechazado deja intacta la
   original; cambio de asiento con QR nuevo y con conflicto en seat-inventory; corrección del pasajero repetida.
   Las reglas una a una están en `RescheduleServiceTest`, `RescheduleSagaTest` y `TicketChangeServiceTest`.
+- `AffectedIT` (Sprint 3, con el consumidor del stream encendido): evento repetido (mismo `eventId`) que afecta y avisa
+  una sola vez; retraso menor al umbral; aceptar, reprogramar gratis y reembolso; doble reembolso concurrente (un solo
+  cobro devuelto); sin cambio de la empresa no hay reembolso; plazo vencido de un retraso, de una cancelación con cupo
+  (reubicación) y sin cupo (reembolso, y sin catalog sigue pendiente); manifiesto por rol, CSV, otra empresa → 404 y
+  registro de accesos. Las reglas una a una están en `AffectedBookingServiceTest`, `AffectedRefundServiceTest`,
+  `AffectedBookingJobTest`, `ManifestServiceTest` y `AffectedMailServiceTest`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -286,10 +357,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-25) | Mínimo |
+| Métrica | Medido (2026-10-26) | Mínimo |
 |---|---|---|
-| Líneas | 82,3 % | `jacoco.minimo.lineas` = 0.80 |
-| Ramas | 73,6 % | `jacoco.minimo.ramas` = 0.70 |
+| Líneas | 90,2 % | `jacoco.minimo.lineas` = 0.90 |
+| Ramas | 82,5 % | `jacoco.minimo.ramas` = 0.80 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
@@ -298,7 +369,8 @@ actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para sub
 
 Fuera de la cobertura (mismas en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está lo que no tiene lógica: `BookingApplication`, los records de `web/dto` (ninguno tiene métodos),
-las entidades JPA de solo constructor/getters (`Passenger`, `PassengerChange`, `Refund`, `SagaLogEntry`, `Ticket`,
+los records `repository/ManifestRow`, las entidades JPA de solo constructor/getters (`Passenger`, `PassengerChange`,
+`ManifestAccessLog`, `Refund`, `SagaLogEntry`, `Ticket`,
 `WebhookLog`, `ProcessedEvent`) y `config/OpenApiConfig`. `Booking`, `Payment`, `IdempotencyKey`,
 `BookingProperties` y `PaymentProperties` tienen lógica y **sí** cuentan.
 
