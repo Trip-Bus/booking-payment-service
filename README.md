@@ -309,7 +309,9 @@ arreglo en Spring Boot 3.x** (hoy CVE-2026-47884 y CVE-2026-47890 de `spring-web
 corrigen en Spring Framework 7); cada una explica en `statement` por qué no aplica a este servicio
 (no usa XsltView ni SSE). Todas **vencen el 2027-01-31** (`expired_at`): desde esa fecha Trivy vuelve a fallar si no
 se migró a Spring Boot 4.1. Lo que sí tiene parche nunca se agrega aquí: se corrige subiendo la
-versión (ver las propiedades `*.version` de parches de seguridad en `pom.xml`).
+versión (ver las propiedades `*.version` de parches de seguridad en `pom.xml`). Los paquetes de Alpine de la
+imagen de ejecución se actualizan con `apk upgrade --no-cache` en el `Dockerfile`, así un parche publicado después
+de la imagen base (p. ej. CVE-2026-111497 de `brotli-libs`) entra en el siguiente build.
 
 El análisis de Sonar solo corre en `develop` (push y PR con base `develop`, ver
 [Flujo de ramas y entornos](#flujo-de-ramas-y-entornos)) y si el repo tiene el secreto `SONAR_TOKEN`;
