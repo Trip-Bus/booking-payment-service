@@ -10,6 +10,7 @@ import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -23,8 +24,8 @@ import java.util.UUID;
 public class Booking {
 
     /**
-     * Transiciones permitidas de la saga de compra. Los estados finales (CONFIRMADA, PAGO_RECHAZADO,
-     * EXPIRADA, REEMBOLSADA) no tienen salida.
+     * Transiciones permitidas de la saga de compra. Los estados finales (PAGO_RECHAZADO, EXPIRADA,
+     * REEMBOLSADA, REPROGRAMADA) no tienen salida; CONFIRMADA solo sale por una reprogramación (US-150).
      */
     private static final Map<BookingStatus, Set<BookingStatus>> TRANSICIONES = new EnumMap<>(BookingStatus.class);
 
@@ -38,6 +39,8 @@ public class Booking {
         TRANSICIONES.put(BookingStatus.PAGO_EN_PROCESO, EnumSet.of(BookingStatus.PAGO_APROBADO, BookingStatus.PAGO_RECHAZADO));
         // Asiento confirmado y tiquete emitido, o el asiento se perdió y se reembolsa.
         TRANSICIONES.put(BookingStatus.PAGO_APROBADO, EnumSet.of(BookingStatus.CONFIRMADA, BookingStatus.REEMBOLSADA));
+        // US-150: se confirmó la reserva nueva que la reemplaza.
+        TRANSICIONES.put(BookingStatus.CONFIRMADA, EnumSet.of(BookingStatus.REPROGRAMADA));
     }
 
     @Id
@@ -82,6 +85,18 @@ public class Booking {
     @Column(name = "company_id")
     private UUID companyId;
 
+    /** US-150: reserva de la que viene esta reprogramación (null en una compra normal). */
+    @Column(name = "origen_booking_id")
+    private UUID origenBookingId;
+
+    /** US-150: valor del pasaje ya pagado en la cadena de reprogramaciones (null en una compra normal). */
+    @Column(name = "valor_pagado")
+    private BigDecimal valorPagado;
+
+    /** US-150: en una reserva REPROGRAMADA, cuándo quedó resuelta la anulación de sus asientos viejos. */
+    @Column(name = "anulacion_resuelta_en")
+    private Instant anulacionResueltaEn;
+
     @Column(name = "creado_en", nullable = false)
     private Instant creadoEn;
 
@@ -122,6 +137,49 @@ public class Booking {
         this.emailContacto = emailContacto;
         this.estado = BookingStatus.PENDIENTE_PAGO;
         this.creadoEn = now;
+        this.actualizadoEn = now;
+    }
+
+    /**
+     * US-150: reserva nueva que reemplaza a {@code origen} con los asientos de otra retención. {@code total} es lo
+     * que falta pagar (la diferencia más el cargo); si es cero no hay nada que cobrar y la reserva nace en
+     * PAGO_APROBADO, lista para confirmar el asiento y emitir el tiquete. {@code valorPagado} es el pasaje que
+     * queda pagado en la cadena (nunca baja: no hay reembolso por decisión del pasajero).
+     */
+    public static Booking reprogramacion(Booking origen, SeatSelection seleccion, BigDecimal precioUnitario,
+                                         BigDecimal total, BigDecimal valorPagado, String emailContacto, Instant now) {
+        Booking b = new Booking(seleccion.holdId(), origen.getUserId(), seleccion.itineraryId(), seleccion.offerId(),
+                seleccion.seatNumbers(), precioUnitario, origen.getMoneda(), seleccion.holdExpiraEn(), emailContacto,
+                origen.getCompanyId(), now);
+        b.origenBookingId = origen.getId();
+        b.total = total;
+        b.valorPagado = valorPagado;
+        if (total.signum() == 0) {
+            b.estado = BookingStatus.PAGO_APROBADO;
+        }
+        return b;
+    }
+
+    /** Asientos retenidos con los que se arma una reserva (los datos de la retención de seat-inventory). */
+    public record SeatSelection(UUID holdId, UUID itineraryId, UUID offerId, List<String> seatNumbers,
+                                Instant holdExpiraEn) {
+    }
+
+    /** US-139: cambia {@code desde} por {@code hacia} en los asientos de la reserva (conserva el orden). */
+    public void cambiarAsiento(String desde, String hacia, Instant now) {
+        List<String> asientos = new ArrayList<>(getSeatNumbers());
+        int i = asientos.indexOf(desde);
+        if (i < 0) {
+            throw new IllegalArgumentException("El asiento " + desde + " no es de la reserva " + id);
+        }
+        asientos.set(i, hacia);
+        this.seatNumbers = String.join(",", asientos);
+        this.actualizadoEn = now;
+    }
+
+    /** US-150: seat-inventory ya respondió a la anulación de los asientos viejos (no queda nada que reintentar). */
+    public void marcarAnulacionResuelta(Instant now) {
+        this.anulacionResueltaEn = now;
         this.actualizadoEn = now;
     }
 
@@ -184,6 +242,19 @@ public class Booking {
 
     public UUID getCompanyId() {
         return companyId;
+    }
+
+    public UUID getOrigenBookingId() {
+        return origenBookingId;
+    }
+
+    /** Valor del pasaje ya pagado: en una reprogramación el acumulado de la cadena; si no, el total. */
+    public BigDecimal getValorPagado() {
+        return valorPagado != null ? valorPagado : total;
+    }
+
+    public Instant getAnulacionResueltaEn() {
+        return anulacionResueltaEn;
     }
 
     public String getEmailContacto() {

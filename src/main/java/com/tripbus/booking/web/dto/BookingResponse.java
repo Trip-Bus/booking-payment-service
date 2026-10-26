@@ -19,6 +19,8 @@ public record BookingResponse(
         Instant holdExpiraEn,
         PaymentSummary pago,
         UUID ticketId,
+        /* US-150: reserva de la que viene esta reprogramación (null en una compra normal). */
+        UUID origenBookingId,
         Instant creadoEn,
         Instant actualizadoEn) {
 }

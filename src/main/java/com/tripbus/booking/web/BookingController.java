@@ -5,9 +5,11 @@ import com.tripbus.booking.service.BookingService;
 import com.tripbus.booking.service.BookingViewer;
 import com.tripbus.booking.service.IdempotencyService;
 import com.tripbus.booking.service.PaymentService;
+import com.tripbus.booking.service.RescheduleService;
 import com.tripbus.booking.web.dto.BookingResponse;
 import com.tripbus.booking.web.dto.CreateBookingRequest;
 import com.tripbus.booking.web.dto.PayRequest;
+import com.tripbus.booking.web.dto.RescheduleRequest;
 import com.tripbus.booking.web.dto.SagaStepResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -31,12 +33,14 @@ public class BookingController {
     private final BookingService bookingService;
     private final PaymentService paymentService;
     private final IdempotencyService idempotencyService;
+    private final RescheduleService rescheduleService;
 
     public BookingController(BookingService bookingService, PaymentService paymentService,
-                             IdempotencyService idempotencyService) {
+                             IdempotencyService idempotencyService, RescheduleService rescheduleService) {
         this.bookingService = bookingService;
         this.paymentService = paymentService;
         this.idempotencyService = idempotencyService;
+        this.rescheduleService = rescheduleService;
     }
 
     /** US-031: crea la reserva con los datos del viajero y devuelve el total a pagar. */
@@ -62,6 +66,18 @@ public class BookingController {
     @GetMapping("/{id}/saga")
     public List<SagaStepResponse> saga(@PathVariable UUID id, Authentication authentication) {
         return bookingService.sagaLog(id, BookingViewer.of(authentication));
+    }
+
+    /**
+     * US-150: reprograma la reserva a otro viaje con los asientos de la retención {holdId}. 201 con la reserva
+     * nueva (PENDIENTE_PAGO si hay diferencia, CONFIRMADA si no); 200 si esa retención ya se usó para esto.
+     */
+    @PostMapping("/{id}/reschedule")
+    public ResponseEntity<BookingResponse> reschedule(@PathVariable UUID id, @Valid @RequestBody RescheduleRequest request,
+                                                      Authentication authentication) {
+        BookingService.CreateResult result = rescheduleService.reschedule(id, request.holdId(),
+                BookingViewer.of(authentication), CurrentUser.email(authentication));
+        return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK).body(result.booking());
     }
 
     /** US-032 + US-034: pago con tarjeta. Requiere el header Idempotency-Key. */

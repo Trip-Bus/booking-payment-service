@@ -40,6 +40,18 @@ public class Passenger {
         this.asiento = asiento;
     }
 
+    /** US-139: el pasajero pasa a otro asiento del mismo viaje. */
+    public void cambiarAsiento(String asiento) {
+        this.asiento = asiento;
+    }
+
+    /** US-152: corrección del nombre o el documento (una sola vez, ver PassengerChange). */
+    public void corregir(String nombre, String tipoDocumento, String numeroDocumento) {
+        this.nombre = nombre;
+        this.tipoDocumento = tipoDocumento;
+        this.numeroDocumento = numeroDocumento;
+    }
+
     public UUID getId() {
         return id;
     }

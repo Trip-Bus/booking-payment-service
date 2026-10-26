@@ -31,9 +31,18 @@ public class CatalogClient {
     public record Price(UUID itineraryId, BigDecimal precioBase, String moneda, String estado) {
     }
 
-    /** companyId: empresa dueña del itinerario (US-005, visibilidad del OPERADOR). */
+    /**
+     * companyId: empresa dueña del itinerario (US-005, visibilidad del OPERADOR). estado: PROGRAMADO o
+     * CANCELADO (US-150: no se reprograma hacia un viaje cancelado).
+     */
     public record ItinerarySummary(UUID itineraryId, String origen, String destino, Instant fechaSalida,
-                                   Instant fechaLlegadaEstimada, String empresa, String placa, UUID companyId) {
+                                   Instant fechaLlegadaEstimada, String empresa, String placa, UUID companyId,
+                                   String estado) {
+
+        public ItinerarySummary(UUID itineraryId, String origen, String destino, Instant fechaSalida,
+                                Instant fechaLlegadaEstimada, String empresa, String placa, UUID companyId) {
+            this(itineraryId, origen, destino, fechaSalida, fechaLlegadaEstimada, empresa, placa, companyId, null);
+        }
 
         public ItinerarySummary(UUID itineraryId, String origen, String destino, Instant fechaSalida,
                                 Instant fechaLlegadaEstimada, String empresa, String placa) {

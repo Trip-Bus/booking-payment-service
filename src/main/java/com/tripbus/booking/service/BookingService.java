@@ -96,34 +96,18 @@ public class BookingService {
                     "Debe registrar un viajero por cada asiento retenido (" + hold.seatNumbers().size() + ")");
         }
 
-        BigDecimal precioUnitario;
-        String moneda = "COP";
-        if (hold.offerId() != null) {
-            FlashOffersClient.OfferReservation reservation = flashOffers.reservationByHold(hold.offerId(), hold.holdId());
-            if (!userId.equals(reservation.userId())) {
-                throw ApiException.forbidden("OFFER_RESERVATION_MISMATCH", "La reserva de oferta no pertenece al usuario");
-            }
-            precioUnitario = reservation.precioOferta();
-        } else {
-            CatalogClient.Price price = catalog.price(hold.itineraryId());
-            if (!"PROGRAMADO".equals(price.estado())) {
-                throw ApiException.conflict("ITINERARY_NOT_AVAILABLE", "El viaje ya no está disponible");
-            }
-            precioUnitario = price.precioBase();
-            moneda = price.moneda();
-        }
+        Precio precio = precio(hold, userId);
         // US-005: empresa del itinerario para la visibilidad del OPERADOR. Si catalog no responde la
         // reserva se crea igual, sin empresa (solo la verán su dueño y ADMIN).
         CatalogClient.ItinerarySummary itinerario = catalog.itinerary(hold.itineraryId());
         UUID companyId = itinerario != null ? itinerario.companyId() : null;
 
-        final String monedaFinal = moneda;
         try {
             BookingResponse response = tx.execute(status -> {
                 Instant now = clock.instant();
                 Booking booking = bookingRepository.save(new Booking(hold.holdId(), userId, hold.itineraryId(),
-                        hold.offerId(), hold.seatNumbers(), precioUnitario, monedaFinal, hold.expiraEn(), emailContacto,
-                        companyId, now));
+                        hold.offerId(), hold.seatNumbers(), precio.unitario(), precio.moneda(), hold.expiraEn(),
+                        emailContacto, companyId, now));
                 for (int i = 0; i < request.pasajeros().size(); i++) {
                     PassengerRequest p = request.pasajeros().get(i);
                     passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
@@ -146,6 +130,25 @@ public class BookingService {
             Booking booking = bookingRepository.findByHoldId(request.holdId()).orElseThrow(() -> e);
             return new CreateResult(existingFor(booking, userId), false);
         }
+    }
+
+    record Precio(BigDecimal unitario, String moneda) {
+    }
+
+    /** Precio por asiento de la retención: el de la oferta relámpago si viene de una, o el de catalog. */
+    Precio precio(SeatInventoryClient.Hold hold, UUID userId) {
+        if (hold.offerId() != null) {
+            FlashOffersClient.OfferReservation reservation = flashOffers.reservationByHold(hold.offerId(), hold.holdId());
+            if (!userId.equals(reservation.userId())) {
+                throw ApiException.forbidden("OFFER_RESERVATION_MISMATCH", "La reserva de oferta no pertenece al usuario");
+            }
+            return new Precio(reservation.precioOferta(), "COP");
+        }
+        CatalogClient.Price price = catalog.price(hold.itineraryId());
+        if (!"PROGRAMADO".equals(price.estado())) {
+            throw ApiException.conflict("ITINERARY_NOT_AVAILABLE", "El viaje ya no está disponible");
+        }
+        return new Precio(price.precioBase(), price.moneda());
     }
 
     @Transactional(readOnly = true)
@@ -191,8 +194,7 @@ public class BookingService {
 
     BookingResponse toResponse(Booking booking) {
         List<PassengerResponse> pasajeros = passengerRepository.findByBookingId(booking.getId()).stream()
-                .map(p -> new PassengerResponse(p.getNombre(), p.getTipoDocumento(), p.getNumeroDocumento(),
-                        p.getAsiento()))
+                .map(BookingService::toPassengerResponse)
                 .toList();
         List<Payment> pagos = paymentRepository.findByBookingIdOrderByCreadoEnDesc(booking.getId());
         PaymentSummary pago = pagos.isEmpty() ? null : toSummary(pagos.get(0));
@@ -200,7 +202,12 @@ public class BookingService {
         return new BookingResponse(booking.getId(), booking.getEstado().name(), booking.getHoldId(),
                 booking.getItineraryId(), booking.getOfferId(), booking.getSeatNumbers(), pasajeros,
                 booking.getPrecioUnitario(), booking.getTotal(), booking.getMoneda(), booking.getHoldExpiraEn(),
-                pago, ticketId, booking.getCreadoEn(), booking.getActualizadoEn());
+                pago, ticketId, booking.getOrigenBookingId(), booking.getCreadoEn(), booking.getActualizadoEn());
+    }
+
+    static PassengerResponse toPassengerResponse(Passenger p) {
+        return new PassengerResponse(p.getId(), p.getNombre(), p.getTipoDocumento(), p.getNumeroDocumento(),
+                p.getAsiento());
     }
 
     static PaymentSummary toSummary(Payment p) {

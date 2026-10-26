@@ -14,7 +14,6 @@ import com.tripbus.booking.domain.Ticket;
 import com.tripbus.booking.repository.BookingRepository;
 import com.tripbus.booking.repository.PassengerRepository;
 import com.tripbus.booking.repository.TicketRepository;
-import com.tripbus.booking.web.dto.PassengerResponse;
 import com.tripbus.booking.web.dto.TicketResponse;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,7 +34,10 @@ import java.util.UUID;
 public class TicketService {
 
     private static final String PREFIX = "TRIPBUS1";
-    private static final String USADO = "USADO";
+    static final String EMITIDO = "EMITIDO";
+    static final String USADO = "USADO";
+    static final String REPROGRAMADO = "REPROGRAMADO";
+    static final String ANULADO = "ANULADO";
     private static final String VALIDO = "valido";
     private static final String MOTIVO = "motivo";
     private static final String ESTADO = "estado";
@@ -63,12 +65,28 @@ public class TicketService {
     public Ticket issue(Booking booking) {
         return ticketRepository.findByBookingId(booking.getId()).orElseGet(() -> {
             UUID ticketId = UUID.randomUUID();
-            String content = PREFIX + "|" + ticketId + "|" + booking.getId() + "|" + booking.getItineraryId() + "|"
-                    + String.join("-", booking.getSeatNumbers());
+            String content = content(ticketId, booking);
             String signature = sign(content);
             return ticketRepository.save(new Ticket(ticketId, booking.getId(), content + "|" + signature, signature,
                     clock.instant()));
         });
+    }
+
+    /**
+     * US-139: el QR incluye los asientos (no el nombre ni el documento del pasajero), así que un cambio de asiento
+     * exige uno nuevo. QR nuevo con los datos actuales de la reserva; el anterior deja de validar porque validate exige el
+     * qr_token vigente. El contenido lleva un sufijo aleatorio para que nunca se repita un QR ya entregado (p. ej.
+     * al volver al asiento original). Devuelve false si el tiquete ya no está EMITIDO. Requiere transacción.
+     */
+    public boolean reissueQr(UUID ticketId, Booking booking) {
+        String content = content(ticketId, booking) + "|R" + UUID.randomUUID().toString().substring(0, 8);
+        String signature = sign(content);
+        return ticketRepository.reemplazarQr(ticketId, content + "|" + signature, signature) == 1;
+    }
+
+    private static String content(UUID ticketId, Booking booking) {
+        return PREFIX + "|" + ticketId + "|" + booking.getId() + "|" + booking.getItineraryId() + "|"
+                + String.join("-", booking.getSeatNumbers());
     }
 
     @Transactional(readOnly = true)
@@ -81,8 +99,7 @@ public class TicketService {
             throw ApiException.notFound("TICKET_NOT_FOUND", "El tiquete no existe");
         }
         var pasajeros = passengerRepository.findByBookingId(booking.getId()).stream()
-                .map(p -> new PassengerResponse(p.getNombre(), p.getTipoDocumento(), p.getNumeroDocumento(),
-                        p.getAsiento()))
+                .map(BookingService::toPassengerResponse)
                 .toList();
         CatalogClient.ItinerarySummary it = catalogClient.itinerary(booking.getItineraryId());
         return new TicketResponse(ticket.getId(), booking.getId(), ticket.getEstado(), ticket.getEmitidoEn(),
@@ -106,6 +123,8 @@ public class TicketService {
     /**
      * Valida un QR al abordar: formato, firma y tiquete existente. Si es válido lo marca como USADO con un
      * UPDATE condicional atómico, así el mismo QR no sirve para abordar dos veces aunque se escanee en paralelo.
+     * Un tiquete REPROGRAMADO responde 409 TICKET_RESCHEDULED y uno ANULADO 409 TICKET_VOIDED; un QR
+     * reemplazado por un cambio de asiento (US-139) responde motivo QR_REEMPLAZADO.
      */
     @Transactional
     public Map<String, Object> validate(String qrCode, UUID validadorId) {
@@ -121,7 +140,7 @@ public class TicketService {
         }
         String[] parts = content.split("\\|");
         UUID ticketId = UUID.fromString(parts[1]);
-        int marcados = ticketRepository.marcarUsado(ticketId, clock.instant(), validadorId);
+        int marcados = ticketRepository.marcarUsado(ticketId, signature, clock.instant(), validadorId);
         // Se relee tras el UPDATE (el contexto quedó limpio) para responder con lo que quedó en la BD.
         Optional<Ticket> ticket = ticketRepository.findById(ticketId);
         if (ticket.isEmpty()) {
@@ -132,10 +151,14 @@ public class TicketService {
             return Map.of(VALIDO, true, "ticketId", t.getId(), "bookingId", t.getBookingId(),
                     "itineraryId", parts[3], "asientos", parts[4], ESTADO, t.getEstado(), USADO_EN, t.getUsadoEn());
         }
-        if (USADO.equals(t.getEstado())) {
-            return Map.of(VALIDO, false, MOTIVO, "YA_USADO", USADO_EN, t.getUsadoEn());
-        }
-        return Map.of(VALIDO, false, MOTIVO, "TIQUETE_NO_VALIDO", ESTADO, t.getEstado());
+        return switch (t.getEstado()) {
+            case USADO -> Map.of(VALIDO, false, MOTIVO, "YA_USADO", USADO_EN, t.getUsadoEn());
+            case REPROGRAMADO -> throw ApiException.conflict("TICKET_RESCHEDULED",
+                    "El tiquete se reprogramó a otro viaje; presente el tiquete nuevo");
+            case ANULADO -> throw ApiException.conflict("TICKET_VOIDED", "El tiquete fue anulado");
+            case EMITIDO -> Map.of(VALIDO, false, MOTIVO, "QR_REEMPLAZADO");
+            default -> Map.of(VALIDO, false, MOTIVO, "TIQUETE_NO_VALIDO", ESTADO, t.getEstado());
+        };
     }
 
     private String sign(String content) {
