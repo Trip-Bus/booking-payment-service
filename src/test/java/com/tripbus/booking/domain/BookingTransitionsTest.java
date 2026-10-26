@@ -40,6 +40,12 @@ class BookingTransitionsTest {
                 b.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, AHORA);
                 b.cambiarEstado(BookingStatus.PAGO_APROBADO, AHORA);
             }
+            case REPROGRAMADA -> {
+                b.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, AHORA);
+                b.cambiarEstado(BookingStatus.PAGO_APROBADO, AHORA);
+                b.cambiarEstado(BookingStatus.CONFIRMADA, AHORA);
+                b.cambiarEstado(BookingStatus.REPROGRAMADA, AHORA);
+            }
             case CONFIRMADA, REEMBOLSADA -> {
                 b.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, AHORA);
                 b.cambiarEstado(BookingStatus.PAGO_APROBADO, AHORA);
@@ -62,7 +68,7 @@ class BookingTransitionsTest {
     @CsvSource({
             "PENDIENTE_PAGO, PAGO_EN_PROCESO", "PENDIENTE_PAGO, EXPIRADA",
             "PAGO_EN_PROCESO, PAGO_APROBADO", "PAGO_EN_PROCESO, PAGO_RECHAZADO",
-            "PAGO_APROBADO, CONFIRMADA", "PAGO_APROBADO, REEMBOLSADA"})
+            "PAGO_APROBADO, CONFIRMADA", "PAGO_APROBADO, REEMBOLSADA", "CONFIRMADA, REPROGRAMADA"})
     void transicionesPermitidas(BookingStatus desde, BookingStatus hacia) {
         Booking b = enEstado(desde);
 
@@ -76,7 +82,7 @@ class BookingTransitionsTest {
             "PENDIENTE_PAGO, CONFIRMADA", "PENDIENTE_PAGO, PAGO_APROBADO", "PAGO_EN_PROCESO, CONFIRMADA",
             "PAGO_EN_PROCESO, EXPIRADA", "PAGO_APROBADO, PAGO_RECHAZADO", "CONFIRMADA, REEMBOLSADA",
             "PAGO_RECHAZADO, PAGO_APROBADO", "EXPIRADA, PAGO_EN_PROCESO", "REEMBOLSADA, CONFIRMADA",
-            "CONFIRMADA, CONFIRMADA"})
+            "CONFIRMADA, CONFIRMADA", "REPROGRAMADA, CONFIRMADA", "PAGO_APROBADO, REPROGRAMADA"})
     void transicionesNoPermitidasLanzanExcepcion(BookingStatus desde, BookingStatus hacia) {
         Booking b = enEstado(desde);
 
@@ -85,6 +91,44 @@ class BookingTransitionsTest {
                 .isInstanceOf(InvalidBookingTransitionException.class)
                 .hasMessage("Transición de reserva no permitida: " + desde + " -> " + hacia);
         assertThat(b.getEstado()).isEqualTo(desde);
+    }
+
+    @Test
+    void unaReprogramacionConDiferenciaQuedaPendienteDePagoYSinDiferenciaNaceAprobada() {
+        Booking origen = enEstado(BookingStatus.CONFIRMADA);
+        Booking.SeatSelection seleccion = new Booking.SeatSelection(UUID.randomUUID(), UUID.randomUUID(), null,
+                List.of("20"), AHORA.plusSeconds(600));
+
+        Booking conDiferencia = Booking.reprogramacion(origen, seleccion, new BigDecimal("120000"),
+                new BigDecimal("25000"), new BigDecimal("120000"), "a@b.co", AHORA);
+        Booking sinDiferencia = Booking.reprogramacion(origen, seleccion, new BigDecimal("80000"),
+                BigDecimal.ZERO, new BigDecimal("95000"), null, AHORA);
+
+        assertThat(conDiferencia.getEstado()).isEqualTo(BookingStatus.PENDIENTE_PAGO);
+        assertThat(conDiferencia.getTotal()).isEqualByComparingTo("25000");
+        assertThat(conDiferencia.getValorPagado()).isEqualByComparingTo("120000");
+        assertThat(conDiferencia.getOrigenBookingId()).isEqualTo(origen.getId());
+        assertThat(conDiferencia.getUserId()).isEqualTo(origen.getUserId());
+        assertThat(conDiferencia.getCompanyId()).isEqualTo(origen.getCompanyId());
+        assertThat(conDiferencia.getSeatNumbers()).containsExactly("20");
+        assertThat(sinDiferencia.getEstado()).isEqualTo(BookingStatus.PAGO_APROBADO);
+        // En una compra normal el pasaje pagado es el total.
+        assertThat(origen.getValorPagado()).isEqualByComparingTo("95000");
+        assertThat(origen.getOrigenBookingId()).isNull();
+    }
+
+    @Test
+    void cambiarAsientoConservaElOrdenYMarcarLaAnulacionLaDejaResuelta() {
+        Booking b = new Booking(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), null, List.of("12", "13"),
+                new BigDecimal("95000"), "COP", AHORA, AHORA);
+
+        b.cambiarAsiento("12", "20", AHORA.plusSeconds(5));
+        b.marcarAnulacionResuelta(AHORA.plusSeconds(9));
+
+        assertThat(b.getSeatNumbers()).containsExactly("20", "13");
+        assertThat(b.getAnulacionResueltaEn()).isEqualTo(AHORA.plusSeconds(9));
+        assertThat(b.getActualizadoEn()).isEqualTo(AHORA.plusSeconds(9));
+        assertThatThrownBy(() -> b.cambiarAsiento("99", "21", AHORA)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

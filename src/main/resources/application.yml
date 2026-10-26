@@ -86,6 +86,11 @@ tripbus:
     flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:18006}
     idempotency-ttl: 24h
     ticket-secret: ${TICKET_SECRET:tripbus_ticket_qa_secret}
+    # US-150: reprogramar el tiquete. Sin reembolso por decisión del pasajero: si el viaje nuevo es más barato
+    # no se devuelve la diferencia.
+    reschedule-cutoff: 3h
+    max-reschedules: 2
+    reschedule-fee: 0
   payment:
     webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:18004/webhooks/payment}
     webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus_webhook_qa_secret}

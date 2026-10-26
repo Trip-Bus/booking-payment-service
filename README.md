@@ -7,7 +7,7 @@ idempotencia y saga de compra con compensaciones.
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Redis 7
 
-**HU:** US-031, US-032, US-033, US-034 · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
+**HU:** US-031, US-032, US-033, US-034, US-150, US-139, US-152 · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
 
 ## API
 
@@ -16,9 +16,15 @@ idempotencia y saga de compra con compensaciones.
 | POST | `/bookings` `{holdId, pasajeros:[{nombre, tipoDocumento, numeroDocumento}]}` | Crea la reserva y calcula el total (Catalog o Flash Offers). |
 | POST | `/bookings/{id}/pay` + header **`Idempotency-Key`** `{cardToken, cardLast4}` | Inicia el pago (202). Reintentos con la misma llave devuelven la misma respuesta. |
 | GET | `/bookings` · `/bookings/{id}` · `/bookings/{id}/saga` | Mis reservas, detalle y bitácora de la saga. |
+| POST | `/bookings/{id}/reschedule` `{holdId}` | **US-150** (dueño): reprograma a otro viaje con los asientos de la retención. 201 con la reserva nueva (`PENDIENTE_PAGO` si hay diferencia, `CONFIRMADA` si no); 200 si esa retención ya se usó para esto. |
 | GET | `/tickets/{id}` · `/tickets/{id}/qr.png` | Tiquete con QR firmado (data URI / PNG). |
 | POST | `/tickets/validate` `{qrCode}` | Validación al abordar (CONDUCTOR/OPERADOR/ADMIN). |
+| POST | `/tickets/{id}/seat` `{fromSeat, toSeat}` | **US-139** (dueño): cambia de asiento en el mismo viaje; el tiquete queda con QR nuevo. |
+| PATCH | `/tickets/{id}/passengers/{passengerId}` `{nombre, tipoDocumento, numeroDocumento}` | **US-152** (dueño): corrige el nombre o el documento de un pasajero, una sola vez. |
 | POST | `/webhooks/payment` | Webhook de la pasarela (firma `X-Signature` HMAC-SHA256, **sin JWT**). |
+
+`pasajeros[].passengerId` (en la reserva y en el tiquete) es el que usa el PATCH. `BookingResponse.origenBookingId`
+indica de qué reserva viene una reprogramación.
 
 ### Saga
 
@@ -26,6 +32,58 @@ idempotencia y saga de compra con compensaciones.
 `PAGO_RECHAZADO` (se libera la retención), `EXPIRADA` (la retención venció) o `REEMBOLSADA`
 (pago aprobado pero el asiento ya no se pudo confirmar). Cada paso queda en `saga_log`; un job
 retoma las sagas interrumpidas y otro concilia reservas/pagos/tiquetes cada 15 min.
+`CONFIRMADA → REPROGRAMADA` (US-150): se confirmó la reserva nueva que la reemplaza.
+
+Estados del tiquete: `EMITIDO`, `USADO`, `REPROGRAMADO` (se cambió por el de una reserva nueva) y `ANULADO`.
+`POST /tickets/validate` responde `409 TICKET_RESCHEDULED` para uno REPROGRAMADO, `409 TICKET_VOIDED` para uno
+ANULADO y `valido: false, motivo: QR_REEMPLAZADO` para un QR que un cambio de asiento reemplazó.
+
+### Reprogramar el tiquete (US-150)
+
+Política: **no hay reembolso por decisión del pasajero**. El pasajero retiene los asientos del viaje nuevo con
+el `POST /seats/holds` normal y llama a `POST /bookings/{id}/reschedule {holdId}`. Se valida (409 con código):
+
+| Código | Regla |
+|---|---|
+| `BOOKING_NOT_RESCHEDULABLE` / `TICKET_NOT_RESCHEDULABLE` | La reserva debe estar `CONFIRMADA` y su tiquete `EMITIDO` (no usado). |
+| `RESCHEDULE_WINDOW_CLOSED` | Deben faltar más de `tripbus.booking.reschedule-cutoff` (3 h) para la salida del viaje original. |
+| `RESCHEDULE_LIMIT_REACHED` | Máximo `tripbus.booking.max-reschedules` (2) en toda la cadena de reprogramaciones. |
+| `RESCHEDULE_IN_PROGRESS` | Ya hay una reprogramación viva de esa reserva (también lo impide un índice único en la BD). |
+| `HOLD_NOT_OWNED` · `HOLD_NOT_ACTIVE` · `SEATS_PASSENGERS_MISMATCH` · `SAME_ITINERARY` · `HOLD_ALREADY_USED` | La retención es del mismo usuario, está activa, tiene un asiento por pasajero y es de otro viaje. |
+| `ITINERARY_NOT_AVAILABLE` · `ITINERARY_DEPARTED` · `ROUTE_MISMATCH` · `COMPANY_MISMATCH` · `CURRENCY_MISMATCH` | El viaje nuevo (catalog) no está cancelado, sale en el futuro, tiene el mismo origen y destino y es de la misma empresa. |
+
+Solo el dueño puede reprogramar o cambiar su tiquete: el OPERADOR (su empresa) y el ADMIN siguen consultando
+todo como siempre, pero las acciones les responden `403 NOT_BOOKING_OWNER` / `NOT_TICKET_OWNER`.
+
+Se crea una reserva nueva con `origen_booking_id`, los mismos pasajeros (con los asientos nuevos) y
+`total = max(0, pasaje nuevo − pasaje ya pagado) + tripbus.booking.reschedule-fee` (0 por defecto). El pasaje nuevo
+se calcula como siempre (catalog o flash-offers) y el pasaje ya pagado es el acumulado de la cadena
+(`bookings.valor_pagado`: si el viaje nuevo es más barato se conserva lo pagado). Con diferencia la reserva queda
+`PENDIENTE_PAGO` y se paga con el `POST /bookings/{id}/pay` de siempre; sin diferencia nace en `PAGO_APROBADO` y se
+confirma de inmediato sin pago. La reserva original no se toca hasta entonces: si la nueva expira o su pago se
+rechaza, sigue intacta.
+
+Al confirmarse la reserva nueva (`PaymentService.confirmAndIssue` + `RescheduleSaga`):
+
+1. ConfirmSale del hold nuevo en seat-inventory (`ASIENTO_VENDIDO`).
+2. En **una sola transacción**: el tiquete viejo pasa a `REPROGRAMADO` con un UPDATE condicional que compite con
+   el abordaje, la reserva vieja a `REPROGRAMADA`, se emite el tiquete nuevo con QR nuevo y la reserva nueva queda
+   `CONFIRMADA` (`REPROGRAMACION_APLICADA` / `REPROGRAMADA` en `saga_log`). El tiquete nuevo se envía por correo.
+   Así nunca quedan dos tiquetes válidos. Si el tiquete viejo ya se usó para abordar, la reprogramación no aplica:
+   se reembolsa (`REPROGRAMACION_NO_APLICABLE`) y se devuelven los asientos nuevos.
+3. Se anulan los asientos viejos con `POST /internal/sales/void` (motivo `REPROGRAMACION`): paso
+   `ANULAR_ASIENTOS_ANTERIORES` (`OK`, `REINTENTO` si seat-inventory no responde, `ERROR` si la rechaza). Las que
+   quedan pendientes (`anulacion_resuelta_en` nulo) las reintenta el job de recuperación de sagas.
+
+### Cambiar de asiento (US-139) y corregir datos del pasajero (US-152)
+
+- **Asiento:** tiquete `EMITIDO` y más de 30 min antes de la salida (`SEAT_CHANGE_WINDOW_CLOSED`). Llama a
+  seat-inventory `POST /internal/sales/swap` (sus 409, p. ej. `SEAT_UNAVAILABLE`, se devuelven tal cual) y, si
+  responde bien, actualiza el asiento del pasajero y `bookings.seat_numbers` en la misma transacción. El QR incluye
+  los asientos: se genera uno nuevo (nuevo `qr_token`, el viejo deja de validar) y se reenvía el tiquete por correo.
+- **Pasajero:** tiquete `EMITIDO` y más de 1 h antes de la salida (`PASSENGER_CHANGE_WINDOW_CLOSED`), una sola vez
+  por pasajero (`409 PASSENGER_ALREADY_CORRECTED`, lo garantiza `passenger_changes` con los valores anteriores y
+  nuevos, `hecho_por` y `creado_en`). El QR no incluye esos datos, así que se conserva.
 
 ### Pasarela sandbox
 
@@ -46,7 +104,10 @@ La pasarela puede reenviar el mismo webhook para demostrar la idempotencia (US-0
 probando que un webhook repetido no cobra ni emite dos veces) y **apagado en PROD**
 (`application-prod.yml`). Desde el IDE lo controla `PAYMENT_DUPLICATE_WEBHOOK` (por defecto `true`).
 
-**Publica:** `BookingCreated`, `PaymentApproved`, `PaymentFailed`, `TicketIssued`, `RefundProcessed`. **Consume:** `HoldExpired`.
+**Publica:** `BookingCreated`, `PaymentApproved`, `PaymentFailed`, `TicketIssued`, `RefundProcessed`,
+`TicketRescheduled` `{userId, bookingIdAnterior, bookingIdNuevo, ticketIdAnterior, ticketIdNuevo, itineraryIdAnterior,
+itineraryIdNuevo}` (US-150) y `TicketUpdated` `{userId, bookingId, ticketId, cambio: ASIENTO | PASAJERO}` (US-139 con
+`fromSeat`/`toSeat`, US-152 con `passengerId`). **Consume:** `HoldExpired`.
 
 ## Flujo de ramas y entornos
 
@@ -202,6 +263,12 @@ mvn -B verify      # unitarias + integración con PostgreSQL y Redis reales (Tes
   reales y prueba la saga con los otros servicios simulados: 5 reintentos concurrentes = 1 cobro,
   webhook duplicado = 1 tiquete, pago rechazado libera la retención, asiento perdido ⇒ reembolso,
   firma inválida ⇒ 401 registrado en `webhook_log`.
+- `RescheduleIT` (Sprint 3, mismo montaje): reprogramar con diferencia (se paga y reemplaza el tiquete), sin
+  diferencia (se confirma sin pago ni reembolso) y con la retención equivocada; fuera de plazo y límite de cambios
+  de toda la cadena; la anulación de asientos falla y el job la recupera; nunca quedan dos tiquetes válidos (también
+  si se aborda con el viejo antes de pagar o con dos reprogramaciones simultáneas); pago rechazado deja intacta la
+  original; cambio de asiento con QR nuevo y con conflicto en seat-inventory; corrección del pasajero repetida.
+  Las reglas una a una están en `RescheduleServiceTest`, `RescheduleSagaTest` y `TicketChangeServiceTest`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -219,10 +286,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-12) | Mínimo |
+| Métrica | Medido (2026-10-25) | Mínimo |
 |---|---|---|
-| Líneas | 74,0 % | `jacoco.minimo.lineas` = 0.70 |
-| Ramas | 61,2 % | `jacoco.minimo.ramas` = 0.60 |
+| Líneas | 82,3 % | `jacoco.minimo.lineas` = 0.80 |
+| Ramas | 73,6 % | `jacoco.minimo.ramas` = 0.70 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
@@ -231,7 +298,7 @@ actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para sub
 
 Fuera de la cobertura (mismas en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está lo que no tiene lógica: `BookingApplication`, los records de `web/dto` (ninguno tiene métodos),
-las entidades JPA de solo constructor/getters (`Passenger`, `Refund`, `SagaLogEntry`, `Ticket`,
+las entidades JPA de solo constructor/getters (`Passenger`, `PassengerChange`, `Refund`, `SagaLogEntry`, `Ticket`,
 `WebhookLog`, `ProcessedEvent`) y `config/OpenApiConfig`. `Booking`, `Payment`, `IdempotencyKey`,
 `BookingProperties` y `PaymentProperties` tienen lógica y **sí** cuentan.
 

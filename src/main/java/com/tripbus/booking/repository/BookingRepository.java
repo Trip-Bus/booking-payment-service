@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -28,4 +29,12 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
                                                      @Param("antes") Instant antes);
 
     long countByEstado(BookingStatus estado);
+
+    /** US-150: hay una reprogramación de {@code origenBookingId} en alguno de esos estados. */
+    boolean existsByOrigenBookingIdAndEstadoIn(UUID origenBookingId, Collection<BookingStatus> estados);
+
+    /** US-150: reservas REPROGRAMADA cuyos asientos viejos aún no se anularon en seat-inventory. */
+    @Query("select b.id from Booking b where b.estado = com.tripbus.booking.domain.BookingStatus.REPROGRAMADA "
+            + "and b.anulacionResueltaEn is null and b.actualizadoEn < :antes order by b.actualizadoEn")
+    List<UUID> findIdsConAnulacionPendiente(@Param("antes") Instant antes);
 }

@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** Llamadas internas a Seat Inventory: GetHold, ConfirmSale y ReleaseHold. */
+/** Llamadas internas a Seat Inventory: GetHold, ConfirmSale, ReleaseHold, VoidSale y SwapSeat. */
 @Component
 public class SeatInventoryClient {
 
@@ -58,6 +58,33 @@ public class SeatInventoryClient {
         try {
             restClient.post().uri("/internal/holds/{id}/release", holdId)
                     .body(Map.of("motivo", motivo)).retrieve().toBodilessEntity();
+        } catch (RestClientException e) {
+            throw RemoteErrors.translate(SERVICE, e);
+        }
+    }
+
+    /**
+     * US-150/US-151: devuelve al inventario asientos vendidos a la reserva. Idempotente en seat-inventory
+     * (repetirla responde 200 sin cambios). motivo: REPROGRAMACION, CANCELACION_EMPRESA, REEMBOLSO o CAMBIO_BUS.
+     */
+    public void voidSale(UUID itineraryId, UUID bookingId, List<String> seatNumbers, String motivo) {
+        try {
+            restClient.post().uri("/internal/sales/void")
+                    .body(Map.of("itineraryId", itineraryId, "bookingId", bookingId, "seatNumbers", seatNumbers,
+                            "motivo", motivo))
+                    .retrieve().toBodilessEntity();
+        } catch (RestClientException e) {
+            throw RemoteErrors.translate(SERVICE, e);
+        }
+    }
+
+    /** US-139: cambia fromSeat por toSeat de la reserva en una sola transacción (409 SEAT_UNAVAILABLE si está ocupado). */
+    public void swapSeat(UUID itineraryId, UUID bookingId, String fromSeat, String toSeat) {
+        try {
+            restClient.post().uri("/internal/sales/swap")
+                    .body(Map.of("itineraryId", itineraryId, "bookingId", bookingId, "fromSeat", fromSeat,
+                            "toSeat", toSeat))
+                    .retrieve().toBodilessEntity();
         } catch (RestClientException e) {
             throw RemoteErrors.translate(SERVICE, e);
         }

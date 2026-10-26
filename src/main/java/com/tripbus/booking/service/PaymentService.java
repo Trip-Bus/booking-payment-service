@@ -61,17 +61,20 @@ public class PaymentService {
     private final WebhookSigner signer;
     private final TicketService ticketService;
     private final TicketMailService ticketMail;
+    private final RescheduleSaga rescheduleSaga;
     private final SagaLogger saga;
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
+    @SuppressWarnings("java:S107") // dependencias de la saga de compra, inyectadas por Spring
     public PaymentService(BookingRepository bookingRepository, PaymentRepository paymentRepository,
                           RefundRepository refundRepository, WebhookLogRepository webhookLogRepository,
                           SeatInventoryClient seatInventory, PaymentGateway gateway, WebhookSigner signer,
-                          TicketService ticketService, TicketMailService ticketMail, SagaLogger saga,
-                          EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
+                          TicketService ticketService, TicketMailService ticketMail, RescheduleSaga rescheduleSaga,
+                          SagaLogger saga, EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper,
+                          Clock clock) {
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
@@ -81,6 +84,7 @@ public class PaymentService {
         this.signer = signer;
         this.ticketService = ticketService;
         this.ticketMail = ticketMail;
+        this.rescheduleSaga = rescheduleSaga;
         this.saga = saga;
         this.events = events;
         this.tx = tx;
@@ -182,6 +186,8 @@ public class PaymentService {
     static final String SIN_RESPUESTA = "SIN_RESPUESTA_DE_LA_PASARELA";
     static final String PASARELA_NO_DISPONIBLE = "PASARELA_NO_DISPONIBLE";
     static final String MONTO_INCORRECTO = "MONTO_INCORRECTO";
+    /** US-150: la reserva original ya no está CONFIRMADA con su tiquete EMITIDO al confirmar la nueva. */
+    static final String REPROGRAMACION_NO_APLICABLE = "REPROGRAMACION_NO_APLICABLE";
 
     private record WebhookResult(WebhookOutcome outcome, UUID bookingId) {
     }
@@ -342,10 +348,19 @@ public class PaymentService {
     /**
      * Pasos 9-11: ConfirmSale en Seat Inventory y emisión del tiquete. Si Seat Inventory no
      * responde, la reserva queda en PAGO_APROBADO y el job de recuperación lo reintenta.
+     * US-150: si la reserva es una reprogramación, en la misma transacción se retira el tiquete viejo
+     * ({@link RescheduleSaga}) y después se anulan sus asientos. Si el tiquete viejo ya se usó para abordar,
+     * la reserva nueva se reembolsa y sus asientos se devuelven.
      */
     public void confirmAndIssue(UUID bookingId) {
         Booking booking = bookingRepository.findById(bookingId).orElse(null);
         if (booking == null || booking.getEstado() != BookingStatus.PAGO_APROBADO) {
+            return;
+        }
+        boolean reprogramacion = booking.getOrigenBookingId() != null;
+        if (reprogramacion && !rescheduleSaga.sigueVigente(booking)) {
+            log.warn("La reserva {} ya no puede reemplazar a {}: se reembolsa", bookingId, booking.getOrigenBookingId());
+            refundAndRelease(bookingId, REPROGRAMACION_NO_APLICABLE);
             return;
         }
         try {
@@ -361,27 +376,55 @@ public class PaymentService {
             return;
         }
 
-        tx.executeWithoutResult(s -> {
-            Booking b = bookingRepository.lockById(bookingId).orElseThrow();
-            if (b.getEstado() != BookingStatus.PAGO_APROBADO) {
-                return;
-            }
-            saga.log(bookingId, "ASIENTO_VENDIDO", "OK", Map.of("holdId", b.getHoldId()));
-            Ticket ticket = ticketService.issue(b);
-            b.cambiarEstado(BookingStatus.CONFIRMADA, clock.instant());
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("bookingId", b.getId());
-            payload.put("ticketId", ticket.getId());
-            payload.put("qrCode", ticket.getQrToken());
-            payload.put("itineraryId", b.getItineraryId());
-            payload.put("seatNumbers", b.getSeatNumbers());
-            payload.put("userId", b.getUserId());
-            payload.put("offerId", b.getOfferId());
-            saga.log(bookingId, "TIQUETE_EMITIDO", "OK", Map.of("ticketId", ticket.getId()));
-            events.publishAfterCommit(BookingEvents.TICKET_ISSUED, payload);
-            // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
-            ticketMail.sendAfterCommit(ticket.getId());
-        });
+        Boolean confirmada = tx.execute(s -> emitirTiquete(bookingId, reprogramacion));
+        if (reprogramacion) {
+            terminarReprogramacion(booking, Boolean.TRUE.equals(confirmada));
+        }
+    }
+
+    /**
+     * Dentro de la transacción: tiquete emitido y reserva CONFIRMADA (en una reprogramación, además se retira el
+     * tiquete viejo). Devuelve false si la reprogramación ya no aplica porque el tiquete viejo se usó para abordar.
+     */
+    private boolean emitirTiquete(UUID bookingId, boolean reprogramacion) {
+        Booking b = bookingRepository.lockById(bookingId).orElseThrow();
+        if (b.getEstado() != BookingStatus.PAGO_APROBADO) {
+            return true;
+        }
+        saga.log(bookingId, "ASIENTO_VENDIDO", "OK", Map.of("holdId", b.getHoldId()));
+        RescheduleSaga.Retiro retiro = reprogramacion ? rescheduleSaga.retirarAnterior(b) : null;
+        if (reprogramacion && retiro == null) {
+            return false;
+        }
+        Ticket ticket = ticketService.issue(b);
+        b.cambiarEstado(BookingStatus.CONFIRMADA, clock.instant());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("bookingId", b.getId());
+        payload.put("ticketId", ticket.getId());
+        payload.put("qrCode", ticket.getQrToken());
+        payload.put("itineraryId", b.getItineraryId());
+        payload.put("seatNumbers", b.getSeatNumbers());
+        payload.put("userId", b.getUserId());
+        payload.put("offerId", b.getOfferId());
+        saga.log(bookingId, "TIQUETE_EMITIDO", "OK", Map.of("ticketId", ticket.getId()));
+        events.publishAfterCommit(BookingEvents.TICKET_ISSUED, payload);
+        if (retiro != null) {
+            rescheduleSaga.registrar(b, retiro, ticket);
+        }
+        // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
+        ticketMail.sendAfterCommit(ticket.getId());
+        return true;
+    }
+
+    /** US-150: tras confirmar se anulan los asientos viejos; si no aplicó, se devuelven los nuevos y se reembolsa. */
+    private void terminarReprogramacion(Booking booking, boolean confirmada) {
+        if (confirmada) {
+            rescheduleSaga.anularAsientosAnteriores(booking.getOrigenBookingId());
+            return;
+        }
+        log.warn("El tiquete anterior de la reserva {} ya se usó: se reembolsa la reprogramación", booking.getId());
+        rescheduleSaga.devolverAsientosNuevos(booking);
+        refundAndRelease(booking.getId(), REPROGRAMACION_NO_APLICABLE);
     }
 
     /** Compensación: el pago se aprobó pero el asiento se perdió → reembolso y liberación. */

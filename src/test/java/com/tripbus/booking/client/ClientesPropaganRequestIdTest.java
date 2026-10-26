@@ -11,13 +11,17 @@ import org.slf4j.MDC;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Los clientes salientes (catalog, seat-inventory, flash-offers) llevan el requestId de la petición
@@ -74,6 +78,41 @@ class ClientesPropaganRequestIdTest {
 
         String path = "/internal/holds/" + holdId;
         assertThat(recibidos).containsEntry(path, "prueba-booking-1").containsEntry(path + "#token", TOKEN);
+    }
+
+    @Test
+    void anularYCambiarAsientosVanASeatInventoryConElTokenInterno() {
+        SeatInventoryClient client = new SeatInventoryClient(properties, TOKEN);
+        client.voidSale(UUID.randomUUID(), UUID.randomUUID(), List.of("12"), "REPROGRAMACION");
+        client.swapSeat(UUID.randomUUID(), UUID.randomUUID(), "12", "14");
+
+        assertThat(recibidos).containsEntry("/internal/sales/void", "prueba-booking-1")
+                .containsEntry("/internal/sales/void#token", TOKEN)
+                .containsEntry("/internal/sales/swap", "prueba-booking-1")
+                .containsEntry("/internal/sales/swap#token", TOKEN);
+    }
+
+    @Test
+    void seatInventoryCaidoSeTraduceAReintentable() {
+        SeatInventoryClient client = new SeatInventoryClient(
+                new BookingProperties("http://localhost:1", null, null, null, "secreto"), TOKEN);
+
+        assertThatThrownBy(() -> client.voidSale(UUID.randomUUID(), UUID.randomUUID(), List.of("12"), "REPROGRAMACION"))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+        assertThatThrownBy(() -> client.swapSeat(UUID.randomUUID(), UUID.randomUUID(), "12", "14"))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+    }
+
+    @Test
+    void lasPropiedadesDeReprogramacionTienenValoresPorDefecto() {
+        assertThat(properties.rescheduleCutoff()).isEqualTo(Duration.ofHours(3));
+        assertThat(properties.maxReschedules()).isEqualTo(2);
+        assertThat(properties.rescheduleFee()).isEqualByComparingTo("0");
+        BookingProperties propias = new BookingProperties(null, null, null, null, null, Duration.ofHours(6), 1,
+                new BigDecimal("5000"));
+        assertThat(propias.rescheduleCutoff()).isEqualTo(Duration.ofHours(6));
+        assertThat(propias.maxReschedules()).isEqualTo(1);
+        assertThat(propias.rescheduleFee()).isEqualByComparingTo("5000");
     }
 
     @Test

@@ -36,11 +36,11 @@
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-12 (brechas de pagos: monto del webhook, aprobado tardío,
-             máquina de estados y operador por empresa) redondeada hacia abajo al 5 %:
-             líneas 74,0 % -> 0.70; ramas 61,2 % -> 0.60. -->
-        <jacoco.minimo.lineas>0.70</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.60</jacoco.minimo.ramas>
+             Fijados con la medición del 2026-10-25 (Sprint 3: reprogramar el tiquete, cambiar de asiento y
+             corregir datos del pasajero) redondeada hacia abajo al 5 %:
+             líneas 82,3 % -> 0.80; ramas 73,6 % -> 0.70. -->
+        <jacoco.minimo.lineas>0.80</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.70</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
@@ -66,7 +66,10 @@
             **/web/dto/SagaStepResponse.java,
             **/web/dto/TicketResponse.java,
             **/web/dto/ValidateTicketRequest.java,
+            **/web/dto/RescheduleRequest.java,
+            **/web/dto/ChangeSeatRequest.java,
             **/domain/Passenger.java,
+            **/domain/PassengerChange.java,
             **/domain/Refund.java,
             **/domain/SagaLogEntry.java,
             **/domain/Ticket.java,
@@ -274,7 +277,10 @@
                         <exclude>**/web/dto/SagaStepResponse.class</exclude>
                         <exclude>**/web/dto/TicketResponse.class</exclude>
                         <exclude>**/web/dto/ValidateTicketRequest.class</exclude>
+                        <exclude>**/web/dto/RescheduleRequest.class</exclude>
+                        <exclude>**/web/dto/ChangeSeatRequest.class</exclude>
                         <exclude>**/domain/Passenger.class</exclude>
+                        <exclude>**/domain/PassengerChange.class</exclude>
                         <exclude>**/domain/Refund.class</exclude>
                         <exclude>**/domain/SagaLogEntry.class</exclude>
                         <exclude>**/domain/Ticket.class</exclude>

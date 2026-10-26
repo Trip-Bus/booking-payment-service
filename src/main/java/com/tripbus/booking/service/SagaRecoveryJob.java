@@ -30,16 +30,18 @@ public class SagaRecoveryJob {
     private final PaymentRepository paymentRepository;
     private final TicketRepository ticketRepository;
     private final PaymentService paymentService;
+    private final RescheduleSaga rescheduleSaga;
     private final LeaderLock leaderLock;
     private final Clock clock;
 
     public SagaRecoveryJob(BookingRepository bookingRepository, PaymentRepository paymentRepository,
-                           TicketRepository ticketRepository, PaymentService paymentService, LeaderLock leaderLock,
-                           Clock clock) {
+                           TicketRepository ticketRepository, PaymentService paymentService,
+                           RescheduleSaga rescheduleSaga, LeaderLock leaderLock, Clock clock) {
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.ticketRepository = ticketRepository;
         this.paymentService = paymentService;
+        this.rescheduleSaga = rescheduleSaga;
         this.leaderLock = leaderLock;
         this.clock = clock;
     }
@@ -63,13 +65,20 @@ public class SagaRecoveryJob {
             log.warn("El pago {} no recibió respuesta de la pasarela; se marca como fallido", paymentId);
             paymentService.failPayment(paymentId, PaymentService.SIN_RESPUESTA);
         }
+        // US-150: reprogramaciones aplicadas cuyos asientos viejos seat-inventory aún no anuló.
+        for (UUID bookingId : bookingRepository.findIdsConAnulacionPendiente(now.minusSeconds(15))) {
+            log.info("Reintentando anular los asientos de la reserva reprogramada {}", bookingId);
+            rescheduleSaga.anularAsientosAnteriores(bookingId);
+        }
     }
 
     /** Conciliación entre bookings, payments y tickets (doc: job cada 15 min). */
     @Scheduled(fixedDelayString = "${tripbus.jobs.reconciliation-ms:900000}", initialDelay = 60000)
     public void reconcile() {
         leaderLock.runIfLeader("booking-reconciliation", Duration.ofMinutes(14), () -> {
-            long confirmadas = bookingRepository.countByEstado(BookingStatus.CONFIRMADA);
+            // Cada reserva CONFIRMADA o REPROGRAMADA (US-150, su tiquete quedó REPROGRAMADO) tiene un tiquete.
+            long confirmadas = bookingRepository.countByEstado(BookingStatus.CONFIRMADA)
+                    + bookingRepository.countByEstado(BookingStatus.REPROGRAMADA);
             long tickets = ticketRepository.count();
             long pendientesConfirmar = bookingRepository.countByEstado(BookingStatus.PAGO_APROBADO);
             if (confirmadas != tickets) {
