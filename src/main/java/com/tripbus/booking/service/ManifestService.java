@@ -17,8 +17,6 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * US-172: manifiesto de pasajeros de un viaje para el ADMIN y para el OPERADOR y el CONDUCTOR de la empresa del viaje
@@ -31,7 +29,6 @@ public class ManifestService {
 
     static final String EMITIDO = TicketService.EMITIDO;
     static final String USADO = TicketService.USADO;
-    private static final Pattern NUMERO = Pattern.compile("^(\\d+)(.*)$");
 
     private final TicketRepository ticketRepository;
     private final BookingRepository bookingRepository;
@@ -101,18 +98,42 @@ public class ManifestService {
 
     /** Orden natural: "2" antes que "10"; los que no empiezan por número van al final en orden alfabético. */
     static int compararAsientos(String a, String b) {
-        Matcher ma = NUMERO.matcher(a == null ? "" : a);
-        Matcher mb = NUMERO.matcher(b == null ? "" : b);
-        boolean na = ma.matches();
-        boolean nb = mb.matches();
-        if (na && nb) {
-            int porNumero = Long.compare(Long.parseLong(ma.group(1)), Long.parseLong(mb.group(1)));
-            return porNumero != 0 ? porNumero : ma.group(2).compareTo(mb.group(2));
+        String x = a == null ? "" : a;
+        String y = b == null ? "" : b;
+        int dx = digitosIniciales(x);
+        int dy = digitosIniciales(y);
+        if (dx > 0 && dy > 0) {
+            int porNumero = compararNumeros(x.substring(0, dx), y.substring(0, dy));
+            return porNumero != 0 ? porNumero : x.substring(dx).compareTo(y.substring(dy));
         }
-        if (na != nb) {
-            return na ? -1 : 1;
+        if ((dx > 0) != (dy > 0)) {
+            return dx > 0 ? -1 : 1;
         }
         return String.valueOf(a).compareTo(String.valueOf(b));
+    }
+
+    private static int digitosIniciales(String s) {
+        int i = 0;
+        while (i < s.length() && Character.isDigit(s.charAt(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    /** Compara dos cadenas de dígitos como números, sin convertirlas (no hay desbordamiento con números largos). */
+    private static int compararNumeros(String x, String y) {
+        String nx = sinCerosALaIzquierda(x);
+        String ny = sinCerosALaIzquierda(y);
+        int porLongitud = Integer.compare(nx.length(), ny.length());
+        return porLongitud != 0 ? porLongitud : nx.compareTo(ny);
+    }
+
+    private static String sinCerosALaIzquierda(String digitos) {
+        int i = 0;
+        while (i < digitos.length() - 1 && digitos.charAt(i) == '0') {
+            i++;
+        }
+        return digitos.substring(i);
     }
 
     /** El mismo contenido en CSV (UTF-8, separado por comas, con los totales al final). */

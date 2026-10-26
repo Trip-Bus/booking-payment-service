@@ -103,6 +103,12 @@ class ManifestServiceTest {
         assertThat(ManifestService.compararAsientos("A", "B")).isNegative();
         assertThat(ManifestService.compararAsientos(null, "1")).isPositive();
         assertThat(ManifestService.compararAsientos(null, null)).isZero();
+        assertThat(ManifestService.compararAsientos("007", "7")).isZero();
+        assertThat(ManifestService.compararAsientos("0", "00")).isZero();
+        assertThat(ManifestService.compararAsientos("09", "10")).isNegative();
+        // Números más largos que un long no desbordan.
+        assertThat(ManifestService.compararAsientos("99999999999999999999999", "100000000000000000000000")).isNegative();
+        assertThat(ManifestService.compararAsientos("12B", "12A")).isPositive();
     }
 
     @Test

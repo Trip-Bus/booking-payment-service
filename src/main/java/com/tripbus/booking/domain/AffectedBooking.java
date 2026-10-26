@@ -77,14 +77,19 @@ public class AffectedBooking {
         this.bookingId = bookingId;
         this.itineraryId = itineraryId;
         this.creadoEn = now;
-        reabrir(causa, plazoDecision, now);
+        pendienteCon(causa, plazoDecision, now);
     }
 
     /**
      * La empresa vuelve a cambiar un viaje cuya reserva sigue confirmada (p. ej. lo cancela después de que el
      * pasajero aceptó un retraso): vuelve a quedar PENDIENTE con la causa y el plazo nuevos.
      */
-    public final void reabrir(Causa nuevaCausa, Instant nuevoPlazo, Instant now) {
+    public void reabrir(Causa nuevaCausa, Instant nuevoPlazo, Instant now) {
+        pendienteCon(nuevaCausa, nuevoPlazo, now);
+    }
+
+    /** Privado (no sobrescribible) para poder usarlo desde el constructor. */
+    private void pendienteCon(Causa nuevaCausa, Instant nuevoPlazo, Instant now) {
         this.causa = nuevaCausa;
         this.plazoDecision = nuevoPlazo;
         this.estado = Estado.PENDIENTE;
