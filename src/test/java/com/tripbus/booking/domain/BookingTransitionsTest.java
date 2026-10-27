@@ -68,7 +68,8 @@ class BookingTransitionsTest {
     @CsvSource({
             "PENDIENTE_PAGO, PAGO_EN_PROCESO", "PENDIENTE_PAGO, EXPIRADA",
             "PAGO_EN_PROCESO, PAGO_APROBADO", "PAGO_EN_PROCESO, PAGO_RECHAZADO",
-            "PAGO_APROBADO, CONFIRMADA", "PAGO_APROBADO, REEMBOLSADA", "CONFIRMADA, REPROGRAMADA"})
+            "PAGO_APROBADO, CONFIRMADA", "PAGO_APROBADO, REEMBOLSADA", "CONFIRMADA, REPROGRAMADA",
+            "CONFIRMADA, REEMBOLSADA"})
     void transicionesPermitidas(BookingStatus desde, BookingStatus hacia) {
         Booking b = enEstado(desde);
 
@@ -80,7 +81,7 @@ class BookingTransitionsTest {
     @ParameterizedTest(name = "{0} -> {1} no permitida")
     @CsvSource({
             "PENDIENTE_PAGO, CONFIRMADA", "PENDIENTE_PAGO, PAGO_APROBADO", "PAGO_EN_PROCESO, CONFIRMADA",
-            "PAGO_EN_PROCESO, EXPIRADA", "PAGO_APROBADO, PAGO_RECHAZADO", "CONFIRMADA, REEMBOLSADA",
+            "PAGO_EN_PROCESO, EXPIRADA", "PAGO_APROBADO, PAGO_RECHAZADO", "CONFIRMADA, EXPIRADA",
             "PAGO_RECHAZADO, PAGO_APROBADO", "EXPIRADA, PAGO_EN_PROCESO", "REEMBOLSADA, CONFIRMADA",
             "CONFIRMADA, CONFIRMADA", "REPROGRAMADA, CONFIRMADA", "PAGO_APROBADO, REPROGRAMADA"})
     void transicionesNoPermitidasLanzanExcepcion(BookingStatus desde, BookingStatus hacia) {

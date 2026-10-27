@@ -30,6 +30,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ClientesPropaganRequestIdTest {
 
     private static final String TOKEN = "token-interno";
+    /** Con este marcador en la ruta o en la consulta el servidor responde un cuerpo JSON null. */
+    private static final String VACIO = "00000000-0000-0000-0000-000000000000";
+    /** Estados de asientos sin la lista "asientos". */
+    private static final String SIN_ASIENTOS = "11111111-1111-1111-1111-111111111111";
 
     private HttpServer server;
     private final Map<String, String> recibidos = new ConcurrentHashMap<>();
@@ -55,7 +59,20 @@ class ClientesPropaganRequestIdTest {
         String path = exchange.getRequestURI().getPath();
         recibidos.put(path, String.valueOf(exchange.getRequestHeaders().getFirst(RequestIdFilter.HEADER)));
         recibidos.put(path + "#token", String.valueOf(exchange.getRequestHeaders().getFirst("X-Internal-Token")));
-        byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
+        String json = "{}";
+        String query = String.valueOf(exchange.getRequestURI().getQuery());
+        if (path.endsWith(VACIO) || query.contains(VACIO)) {
+            json = "null";
+        } else if (path.endsWith(SIN_ASIENTOS)) {
+            json = "{\"capacidad\":0}";
+        } else if (path.startsWith("/trips/search")) {
+            recibidos.put(path + "#query", query);
+            json = "[{\"itineraryId\":\"" + UUID.randomUUID() + "\",\"asientosDisponibles\":4}]";
+        } else if (path.startsWith("/seats/itineraries/")) {
+            json = "{\"capacidad\":3,\"asientos\":[{\"seatNumber\":\"1\",\"estado\":\"VENDIDO\"},"
+                    + "{\"seatNumber\":\"2\",\"estado\":\"DISPONIBLE\"},{\"seatNumber\":\"3\",\"estado\":\"DISPONIBLE\"}]}";
+        }
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json");
         exchange.sendResponseHeaders(200, body.length);
         try (OutputStream out = exchange.getResponseBody()) {
@@ -90,6 +107,61 @@ class ClientesPropaganRequestIdTest {
                 .containsEntry("/internal/sales/void#token", TOKEN)
                 .containsEntry("/internal/sales/swap", "prueba-booking-1")
                 .containsEntry("/internal/sales/swap#token", TOKEN);
+    }
+
+    @Test
+    void busquedaDeViajesAsientosLibresYRetencionInterna() {
+        List<CatalogClient.TripOption> viajes = new CatalogClient(properties)
+                .search("Bogotá", "Medellín", java.time.LocalDate.of(2026, 10, 27));
+        assertThat(viajes).hasSize(1);
+        assertThat(viajes.get(0).asientosDisponibles()).isEqualTo(4);
+        assertThat(recibidos.get("/trips/search#query")).contains("origin=Bogot").contains("date=2026-10-27");
+
+        SeatInventoryClient client = new SeatInventoryClient(properties, TOKEN);
+        assertThat(client.availableSeats(UUID.randomUUID())).containsExactly("2", "3");
+        client.createHold(UUID.randomUUID(), List.of("2"), UUID.randomUUID());
+        assertThat(recibidos).containsEntry("/internal/holds#token", TOKEN);
+    }
+
+    @Test
+    void cuerposVaciosYElRestoDeLlamadasInternas() {
+        UUID vacio = UUID.fromString(VACIO);
+        CatalogClient catalog = new CatalogClient(properties);
+        assertThat(catalog.search("Bogotá", VACIO, java.time.LocalDate.of(2026, 10, 27))).isEmpty();
+        assertThat(catalog.itinerary(UUID.randomUUID())).isNotNull();
+
+        SeatInventoryClient client = new SeatInventoryClient(properties, TOKEN);
+        assertThat(client.availableSeats(vacio)).isEmpty();
+        assertThat(client.availableSeats(UUID.fromString(SIN_ASIENTOS))).isEmpty();
+        UUID holdId = UUID.randomUUID();
+        client.confirmSale(holdId, UUID.randomUUID());
+        client.releaseHold(holdId, "PRUEBA");
+        assertThat(recibidos).containsKey("/internal/holds/" + holdId + "/confirm")
+                .containsKey("/internal/holds/" + holdId + "/release");
+
+        BookingProperties caidos = new BookingProperties("http://localhost:1", "http://localhost:1", null, null, "s");
+        assertThat(new CatalogClient(caidos).itinerary(holdId)).isNull();
+        SeatInventoryClient caido = new SeatInventoryClient(caidos, TOKEN);
+        assertThatThrownBy(() -> caido.getHold(holdId)).isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+        assertThatThrownBy(() -> caido.releaseHold(holdId, "X"))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+        assertThatThrownBy(() -> new CatalogClient(caidos).price(holdId))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+    }
+
+    @Test
+    void sinRespuestaDeCatalogOSeatInventoryNoSeConcluyeQueNoHayCupo() {
+        BookingProperties caidos = new BookingProperties("http://localhost:1", "http://localhost:1", null, null, "s");
+        java.time.LocalDate dia = java.time.LocalDate.of(2026, 10, 27);
+
+        assertThatThrownBy(() -> new CatalogClient(caidos).search("A", "B", dia))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+        SeatInventoryClient client = new SeatInventoryClient(caidos, TOKEN);
+        UUID id = UUID.randomUUID();
+        assertThatThrownBy(() -> client.availableSeats(id)).isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+        List<String> asientos = List.of("1");
+        assertThatThrownBy(() -> client.createHold(id, asientos, id))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
     }
 
     @Test

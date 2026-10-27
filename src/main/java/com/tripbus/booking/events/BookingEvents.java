@@ -12,7 +12,16 @@ public final class BookingEvents {
     /** US-139 / US-152: cambio de asiento o corrección de datos del pasajero (campo "cambio"). */
     public static final String TICKET_UPDATED = "TicketUpdated";
 
+    /** US-154: la empresa canceló o cambió el viaje de una reserva confirmada (con las opciones del pasajero). */
+    public static final String BOOKING_AFFECTED = "BookingAffected";
+    /** US-155: el sistema reubicó una reserva afectada en otro viaje. */
+    public static final String BOOKING_RELOCATED = "BookingRelocated";
+
     public static final String HOLD_EXPIRED = "HoldExpired";
+    /** Catalog: la empresa canceló el viaje. */
+    public static final String ITINERARY_CANCELLED = "ItineraryCancelled";
+    /** Catalog: la empresa reprogramó o retrasó el viaje (tipo REPROGRAMACION | RETRASO, minutosDiferencia). */
+    public static final String ITINERARY_RESCHEDULED = "ItineraryRescheduled";
 
     private BookingEvents() {
     }

@@ -91,6 +91,10 @@ tripbus:
     reschedule-cutoff: 3h
     max-reschedules: 2
     reschedule-fee: 0
+    # US-154/US-155: reservas afectadas por la empresa. Un retraso afecta si es de al menos affected-delay-min
+    # minutos; el pasajero tiene affected-decision-window para elegir (después decide el sistema).
+    affected-delay-min: 60
+    affected-decision-window: 24h
   payment:
     webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:18004/webhooks/payment}
     webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus_webhook_qa_secret}

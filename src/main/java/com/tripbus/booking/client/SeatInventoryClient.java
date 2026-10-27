@@ -37,6 +37,42 @@ public class SeatInventoryClient {
                        UUID bookingId, String estado, Instant expiraEn, long segundosRestantes) {
     }
 
+    /** Estado de un asiento en GET /seats/itineraries/{id} (DISPONIBLE, RETENIDO, VENDIDO, EN_OFERTA, BLOQUEADO). */
+    public record SeatView(String seatNumber, String estado) {
+    }
+
+    public record SeatStates(UUID itineraryId, int capacidad, List<SeatView> asientos) {
+    }
+
+    /**
+     * US-155: asientos DISPONIBLE del viaje en orden natural (como los devuelve seat-inventory). Es la consulta
+     * pública de estados, sin usuario.
+     */
+    public List<String> availableSeats(UUID itineraryId) {
+        try {
+            SeatStates states = restClient.get().uri("/seats/itineraries/{id}", itineraryId).retrieve()
+                    .body(SeatStates.class);
+            if (states == null || states.asientos() == null) {
+                return List.of();
+            }
+            return states.asientos().stream().filter(s -> "DISPONIBLE".equals(s.estado()))
+                    .map(SeatView::seatNumber).toList();
+        } catch (RestClientException e) {
+            throw RemoteErrors.translate(SERVICE, e);
+        }
+    }
+
+    /** US-155: retiene asientos a nombre del pasajero (HoldSeats para otro servicio). 409 SEAT_UNAVAILABLE si se ocuparon. */
+    public Hold createHold(UUID itineraryId, List<String> seatNumbers, UUID userId) {
+        try {
+            return restClient.post().uri("/internal/holds")
+                    .body(Map.of("itineraryId", itineraryId, "seatNumbers", seatNumbers, "userId", userId))
+                    .retrieve().body(Hold.class);
+        } catch (RestClientException e) {
+            throw RemoteErrors.translate(SERVICE, e);
+        }
+    }
+
     public Hold getHold(UUID holdId) {
         try {
             return restClient.get().uri("/internal/holds/{id}", holdId).retrieve().body(Hold.class);

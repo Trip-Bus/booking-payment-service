@@ -9,6 +9,8 @@ import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.util.List;
 import java.util.UUID;
 
 /** Catalog (REST): valida el itinerario y su precio base. */
@@ -63,6 +65,30 @@ public class CatalogClient {
             return restClient.get().uri("/itineraries/{id}", itineraryId).retrieve().body(ItinerarySummary.class);
         } catch (RestClientException e) {
             return null;
+        }
+    }
+
+    /**
+     * Un resultado de GET /trips/search. asientosDisponibles es null si catalog no pudo consultar a seat-inventory
+     * (disponibilidad desconocida).
+     */
+    public record TripOption(UUID itineraryId, UUID routeId, String origen, String destino, Instant fechaSalida,
+                             Integer asientosDisponibles) {
+    }
+
+    /**
+     * US-155: viajes programados de la ruta en ese día (hora de Colombia), ordenados por salida. Si catalog no
+     * responde lanza {@link RemoteErrors.RemoteUnavailableException}: quien llama no debe concluir "no hay cupo".
+     */
+    public List<TripOption> search(String origen, String destino, LocalDate fecha) {
+        try {
+            TripOption[] trips = restClient.get()
+                    .uri(u -> u.path("/trips/search").queryParam("origin", origen).queryParam("destination", destino)
+                            .queryParam("date", fecha).build())
+                    .retrieve().body(TripOption[].class);
+            return trips == null ? List.of() : List.of(trips);
+        } catch (RestClientException e) {
+            throw RemoteErrors.translate("Catalog", e);
         }
     }
 }
