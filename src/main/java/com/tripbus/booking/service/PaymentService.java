@@ -150,12 +150,18 @@ public class PaymentService {
         String redirectUrl = null;
         try {
             if ("PSE".equals(method) || "NEQUI".equals(method)) extendHoldQuietly(snapshot.getHoldId());
-            PaymentGateway.ChargeResult gatewayResult = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(),
-                    new PaymentGateway.ChargeRequest(method, request.cardToken(),
-                            request.pse() == null ? null : request.pse().bancoCodigo(),
-                            request.nequi() == null ? null : request.nequi().telefono()));
-            String gatewayId = gatewayResult.gatewayPaymentId();
-            redirectUrl = gatewayResult.redirectUrl();
+            String gatewayId;
+            if ("TARJETA".equals(method)) {
+                // Compatibilidad con los consumidores existentes de tarjeta durante la migración de la interfaz.
+                gatewayId = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(), request.cardToken());
+            } else {
+                PaymentGateway.ChargeResult gatewayResult = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(),
+                        new PaymentGateway.ChargeRequest(method, request.cardToken(),
+                                request.pse() == null ? null : request.pse().bancoCodigo(),
+                                request.nequi() == null ? null : request.nequi().telefono()));
+                gatewayId = gatewayResult.gatewayPaymentId();
+                redirectUrl = gatewayResult.redirectUrl();
+            }
             tx.executeWithoutResult(s -> paymentRepository.lockById(payment.getId()).ifPresent(p -> {
                 if (p.getPaymentGatewayId() == null) {
                     p.asignarGatewayId(gatewayId, clock.instant());
