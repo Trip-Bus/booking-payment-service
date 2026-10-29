@@ -4,6 +4,7 @@ import com.tripbus.booking.config.PaymentProperties;
 import com.tripbus.booking.domain.Payment;
 import com.tripbus.booking.payment.SandboxPaymentGateway;
 import com.tripbus.booking.repository.PaymentRepository;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -21,10 +22,11 @@ import java.util.Map;
 /** Páginas públicas únicamente para el sandbox local; los ids de pasarela son aleatorios. */
 @RestController
 public class SandboxPaymentController {
-    private final SandboxPaymentGateway gateway;
+    // Opcional: con otra pasarela (o un mock de PaymentGateway en pruebas) no hay sandbox que completar.
+    private final ObjectProvider<SandboxPaymentGateway> gateway;
     private final PaymentRepository payments;
     private final PaymentProperties properties;
-    public SandboxPaymentController(SandboxPaymentGateway gateway, PaymentRepository payments, PaymentProperties properties) {
+    public SandboxPaymentController(ObjectProvider<SandboxPaymentGateway> gateway, PaymentRepository payments, PaymentProperties properties) {
         this.gateway = gateway; this.payments = payments; this.properties = properties;
     }
     @GetMapping("/payments/pse/banks")
@@ -49,8 +51,10 @@ public class SandboxPaymentController {
         if (!properties.sandboxPagesEnabled()) return ResponseEntity.notFound().build();
         Payment payment = payments.findByPaymentGatewayId(gatewayPaymentId).orElse(null);
         if (payment == null) return ResponseEntity.notFound().build();
+        SandboxPaymentGateway sandbox = gateway.getIfAvailable();
+        if (sandbox == null) return ResponseEntity.notFound().build();
         boolean approve = "approve".equals(action) && !"Banco que rechaza".equals(payment.getBanco());
-        gateway.completePse(gatewayPaymentId, approve);
+        sandbox.completePse(gatewayPaymentId, approve);
         return ResponseEntity.status(302).location(URI.create(properties.frontendUrl() + "/pago/" + payment.getBookingId())).build();
     }
 }
