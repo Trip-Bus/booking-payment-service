@@ -9,13 +9,16 @@ import jakarta.validation.constraints.Size;
  * el token (nunca el número completo). En el sandbox use tok_visa_approved / tok_visa_declined.
  */
 public record PayRequest(
-        @NotBlank(message = "El token de la tarjeta es obligatorio")
-        @Size(max = 120)
-        String cardToken,
+        String metodo,
+
+        @Size(max = 120) String cardToken,
 
         @Pattern(regexp = "\\d{4}", message = "cardLast4 deben ser 4 dígitos")
         String cardLast4,
 
-        @Size(max = 20)
-        String cardBrand) {
+        @Size(max = 20) String cardBrand,
+        PseData pse, NequiData nequi) {
+    public record PseData(String bancoCodigo, String tipoPersona, String tipoDocumento, String numeroDocumento) { }
+    public record NequiData(String telefono) { }
+    public String method() { return metodo == null || metodo.isBlank() ? "TARJETA" : metodo.toUpperCase(); }
 }

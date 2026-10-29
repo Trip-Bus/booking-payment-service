@@ -96,6 +96,8 @@ public class PaymentService {
 
     /** US-032: inicia el pago. La idempotencia por Idempotency-Key la aplica IdempotencyService. */
     public PaymentResponse pay(UUID bookingId, UUID userId, PayRequest request, String idempotencyKey) {
+        String method = request.method();
+        validatePaymentData(request, method);
         Booking snapshot = bookingRepository.findById(bookingId)
                 .filter(b -> b.getUserId().equals(userId))
                 .orElseThrow(() -> ApiException.notFound("BOOKING_NOT_FOUND", "La reserva no existe"));
@@ -130,7 +132,8 @@ public class PaymentService {
             }
             Instant now = clock.instant();
             Payment p = paymentRepository.save(new Payment(booking.getId(), booking.getTotal(),
-                    userId + ":" + idempotencyKey, request.cardLast4(), request.cardBrand(), now));
+                    userId + ":" + idempotencyKey, method, paymentLast4(request, method), request.cardBrand(),
+                    "PSE".equals(method) ? bankName(request.pse().bancoCodigo()) : null, now));
             booking.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, now);
             saga.log(booking.getId(), "PAGO_SOLICITADO", "OK", Map.of("paymentId", p.getId(), "monto", p.getMonto()));
             return p;
@@ -144,9 +147,15 @@ public class PaymentService {
         }
 
         // Paso 7: llamar a la pasarela. Si falla, compensación: liberar la retención.
+        String redirectUrl = null;
         try {
-            String gatewayId = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(),
-                    request.cardToken());
+            if ("PSE".equals(method) || "NEQUI".equals(method)) extendHoldQuietly(snapshot.getHoldId());
+            PaymentGateway.ChargeResult gatewayResult = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(),
+                    new PaymentGateway.ChargeRequest(method, request.cardToken(),
+                            request.pse() == null ? null : request.pse().bancoCodigo(),
+                            request.nequi() == null ? null : request.nequi().telefono()));
+            String gatewayId = gatewayResult.gatewayPaymentId();
+            redirectUrl = gatewayResult.redirectUrl();
             tx.executeWithoutResult(s -> paymentRepository.lockById(payment.getId()).ifPresent(p -> {
                 if (p.getPaymentGatewayId() == null) {
                     p.asignarGatewayId(gatewayId, clock.instant());
@@ -159,9 +168,23 @@ public class PaymentService {
             throw ApiException.unavailable("PAYMENT_GATEWAY_UNAVAILABLE",
                     "La pasarela de pagos no está disponible; no se realizó ningún cobro");
         }
+        String message = "NEQUI".equals(method) ? "Acepta el pago en tu app Nequi" : "Pago en proceso. El resultado llegará en unos segundos.";
         return new PaymentResponse(payment.getId(), bookingId, PaymentStatus.PENDIENTE.name(), payment.getMonto(),
-                snapshot.getMoneda(), "Pago en proceso. El resultado llegará en unos segundos.");
+                snapshot.getMoneda(), message, redirectUrl);
     }
+
+    private static void validatePaymentData(PayRequest request, String method) {
+        if (!List.of("TARJETA", "PSE", "NEQUI").contains(method)) throw ApiException.badRequest("INVALID_PAYMENT_METHOD", "Método de pago no soportado");
+        if ("TARJETA".equals(method) && (request.cardToken() == null || request.cardToken().isBlank())) throw ApiException.badRequest("INVALID_CARD", "El token de la tarjeta es obligatorio");
+        if ("NEQUI".equals(method) && (request.nequi() == null || request.nequi().telefono() == null || !request.nequi().telefono().matches("3\\d{9}"))) throw ApiException.badRequest("INVALID_NEQUI_PHONE", "El celular Nequi debe tener 10 dígitos colombianos");
+        if ("PSE".equals(method) && (request.pse() == null || !List.of("1", "2").contains(request.pse().bancoCodigo()) || !List.of("NATURAL", "JURIDICA").contains(request.pse().tipoPersona()) || request.pse().numeroDocumento() == null || request.pse().numeroDocumento().length() < 4)) throw ApiException.badRequest("INVALID_PSE", "Los datos PSE no son válidos");
+    }
+    private static String paymentLast4(PayRequest request, String method) {
+        String value = "NEQUI".equals(method) ? request.nequi().telefono() : "PSE".equals(method) ? request.pse().numeroDocumento() : request.cardLast4();
+        return value == null ? null : value.substring(Math.max(0, value.length() - 4));
+    }
+    private static String bankName(String code) { return "1".equals(code) ? "Banco que aprueba" : "Banco que rechaza"; }
+    private void extendHoldQuietly(UUID holdId) { try { seatInventory.extendHold(holdId, 300); } catch (RuntimeException e) { log.info("No fue necesario extender la retención {}", holdId); } }
 
     private PaymentResponse currentPaymentIfAny(Booking booking) {
         if (booking.getEstado() == BookingStatus.PENDIENTE_PAGO) {

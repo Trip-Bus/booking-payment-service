@@ -102,6 +102,10 @@ tripbus:
     # Simula a la pasarela reenviando el mismo webhook (US-034: no debe cobrar ni emitir dos veces).
     # application-qa.yml lo fija en true y application-prod.yml en false.
     duplicate-webhook: ${PAYMENT_DUPLICATE_WEBHOOK:true}
+    nequi-delay: ${PAYMENT_SANDBOX_NEQUI_DELAY:5s}
+    pse-timeout: ${PAYMENT_SANDBOX_PSE_TIMEOUT:10m}
+    sandbox-pages-enabled: ${PAYMENT_SANDBOX_PAGES_ENABLED:true}
+    frontend-url: ${FRONTEND_URL:http://localhost:5173}
   # US-033: el tiquete se envía por correo con el QR adjunto. Sin MAIL_HOST el envío queda deshabilitado
   # (un WARN al arrancar); no es una variable obligatoria en ningún entorno.
   mail:

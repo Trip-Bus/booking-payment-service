@@ -414,3 +414,12 @@ docker build -t booking-payment-service:local . && \
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src" aquasec/trivy:0.70.0 \
   image --severity CRITICAL,HIGH --ignore-unfixed --ignorefile /src/.trivyignore.yaml booking-payment-service:local
 ```
+# Pagos sandbox (US-143)
+
+`POST /bookings/{id}/pay` conserva el cuerpo histórico de tarjeta (`cardToken`, `cardLast4`, `cardBrand`) y ahora acepta `metodo` (`TARJETA`, `PSE` o `NEQUI`). Incluya siempre `Idempotency-Key`.
+
+- Tarjeta: `tok_visa_approved` aprueba y `tok_visa_declined` rechaza.
+- Nequi: `{"metodo":"NEQUI","nequi":{"telefono":"3991111111"}}` aprueba; `3992222222` rechaza y cualquier otro celular colombiano de 10 dígitos genera error. La respuesta queda pendiente mientras se acepta en la app.
+- PSE: consulte `GET /payments/pse/banks`; use el banco `1` para aprobar o `2` para rechazar. Envíe `pse` con `bancoCodigo`, `tipoPersona` (`NATURAL`/`JURIDICA`), `tipoDocumento` y `numeroDocumento`. La respuesta devuelve `redirectUrl`; la página sandbox permite completar el pago y vence a los 10 minutos.
+
+El sandbox no guarda números de tarjeta, teléfonos ni documentos completos: solo últimos cuatro dígitos y, para PSE, el nombre del banco. Para conectar Wompi, PayU u otra pasarela se implementa `PaymentGateway`; la saga, el webhook firmado y los reembolsos no requieren cambios ni llaves de proveedor en este proyecto.
