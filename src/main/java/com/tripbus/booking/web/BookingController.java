@@ -4,10 +4,13 @@ import com.tripbus.booking.common.security.CurrentUser;
 import com.tripbus.booking.service.BookingService;
 import com.tripbus.booking.service.BookingViewer;
 import com.tripbus.booking.service.IdempotencyService;
+import com.tripbus.booking.service.MyTripsService;
 import com.tripbus.booking.service.PaymentService;
 import com.tripbus.booking.service.RescheduleService;
 import com.tripbus.booking.web.dto.BookingResponse;
 import com.tripbus.booking.web.dto.CreateBookingRequest;
+import com.tripbus.booking.web.dto.MyTripResponse;
+import com.tripbus.booking.web.dto.PageResponse;
 import com.tripbus.booking.web.dto.PayRequest;
 import com.tripbus.booking.web.dto.RescheduleRequest;
 import com.tripbus.booking.web.dto.SagaStepResponse;
@@ -21,6 +24,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -34,9 +38,12 @@ public class BookingController {
     private final PaymentService paymentService;
     private final IdempotencyService idempotencyService;
     private final RescheduleService rescheduleService;
+    private final MyTripsService myTripsService;
 
     public BookingController(BookingService bookingService, PaymentService paymentService,
-                             IdempotencyService idempotencyService, RescheduleService rescheduleService) {
+                             IdempotencyService idempotencyService, RescheduleService rescheduleService,
+                             MyTripsService myTripsService) {
+        this.myTripsService = myTripsService;
         this.bookingService = bookingService;
         this.paymentService = paymentService;
         this.idempotencyService = idempotencyService;
@@ -55,6 +62,18 @@ public class BookingController {
     @GetMapping
     public List<BookingResponse> mine(Authentication authentication) {
         return bookingService.mine(CurrentUser.id(authentication));
+    }
+
+    /**
+     * US-145: mis viajes próximos (salida hoy o después, hora de Colombia; ascendente) o pasados (descendente).
+     * Solo CONFIRMADA, REPROGRAMADA y REEMBOLSADA. Paginado (page desde 0, size hasta 50).
+     */
+    @GetMapping(params = "scope")
+    public PageResponse<MyTripResponse> myTrips(@RequestParam String scope,
+                                                @RequestParam(defaultValue = "0") int page,
+                                                @RequestParam(defaultValue = "10") int size,
+                                                Authentication authentication) {
+        return myTripsService.list(CurrentUser.id(authentication), MyTripsService.scope(scope), page, size);
     }
 
     @GetMapping("/{id}")

@@ -121,12 +121,23 @@ public class TicketMailService {
      * suma un intento; nunca lanza excepciones.
      */
     public boolean send(UUID ticketId) {
+        return send(ticketId, false);
+    }
+
+    /** US-145: reenvía el tiquete en segundo plano aunque ya se haya enviado antes. Nunca lanza excepciones. */
+    public void resend(UUID ticketId) {
+        if (enabled()) {
+            submit(executor, () -> send(ticketId, true));
+        }
+    }
+
+    boolean send(UUID ticketId, boolean reenvio) {
         if (!enabled()) {
             return false;
         }
         try {
             Ticket ticket = ticketRepository.findById(ticketId).orElse(null);
-            if (ticket == null || ticket.getNotificadoEn() != null) {
+            if (ticket == null || (!reenvio && ticket.getNotificadoEn() != null)) {
                 return false;
             }
             Booking booking = bookingRepository.findById(ticket.getBookingId()).orElse(null);

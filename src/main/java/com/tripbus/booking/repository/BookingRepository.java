@@ -3,8 +3,11 @@ package com.tripbus.booking.repository;
 import com.tripbus.booking.domain.Booking;
 import com.tripbus.booking.domain.BookingStatus;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -45,6 +48,45 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
 
     /** US-155: la reprogramación más reciente de {@code origenBookingId}. */
     Optional<Booking> findFirstByOrigenBookingIdOrderByCreadoEnDesc(UUID origenBookingId);
+
+    /** US-145: mis viajes con salida desde {@code desde} (próximos), de la más cercana a la más lejana. */
+    @Query(value = "select b from Booking b where b.userId = :userId and b.estado in :estados "
+            + "and b.fechaSalida >= :desde order by b.fechaSalida asc, b.creadoEn asc",
+            countQuery = "select count(b) from Booking b where b.userId = :userId and b.estado in :estados "
+                    + "and b.fechaSalida >= :desde")
+    Page<Booking> findProximos(@Param("userId") UUID userId, @Param("estados") Collection<BookingStatus> estados,
+                               @Param("desde") Instant desde, Pageable pageable);
+
+    /** US-145: el resto (salida antes de {@code desde}, o aún sin datos del viaje), de la más reciente a la más vieja. */
+    @Query(value = "select b from Booking b where b.userId = :userId and b.estado in :estados "
+            + "and (b.fechaSalida < :desde or b.fechaSalida is null) order by b.fechaSalida desc nulls last, "
+            + "b.creadoEn desc",
+            countQuery = "select count(b) from Booking b where b.userId = :userId and b.estado in :estados "
+                    + "and (b.fechaSalida < :desde or b.fechaSalida is null)")
+    Page<Booking> findPasados(@Param("userId") UUID userId, @Param("estados") Collection<BookingStatus> estados,
+                              @Param("desde") Instant desde, Pageable pageable);
+
+    /** Viajes con reservas que aún no tienen sus datos (los rellena TripDataBackfill). */
+    @Query("select distinct b.itineraryId from Booking b where b.fechaSalida is null")
+    List<UUID> findItinerariosSinViaje();
+
+    /** TripDataBackfill: copia los datos del viaje en sus reservas que aún no los tienen (idempotente). */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Booking b set b.origen = :origen, b.destino = :destino, b.fechaSalida = :salida, "
+            + "b.empresaNombre = :empresa where b.itineraryId = :itineraryId and b.fechaSalida is null")
+    int rellenarViaje(@Param("itineraryId") UUID itineraryId, @Param("origen") String origen,
+                      @Param("destino") String destino, @Param("salida") Instant salida,
+                      @Param("empresa") String empresa);
+
+    /** ItineraryRescheduled: la nueva salida del viaje en todas sus reservas. */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Booking b set b.fechaSalida = :salida where b.itineraryId = :itineraryId")
+    int actualizarSalida(@Param("itineraryId") UUID itineraryId, @Param("salida") Instant salida);
+
+    /** US-144: ventas en taquilla creadas en [desde, hasta), en orden de venta. */
+    @Query("select b from Booking b where b.canal = com.tripbus.booking.domain.Booking.Canal.TAQUILLA "
+            + "and b.creadoEn >= :desde and b.creadoEn < :hasta order by b.creadoEn")
+    List<Booking> findVentasTaquilla(@Param("desde") Instant desde, @Param("hasta") Instant hasta);
 
     /** US-172: empresa del viaje según sus reservas (si catalog no responde). */
     @Query("select distinct b.companyId from Booking b where b.itineraryId = :itineraryId and b.companyId is not null")

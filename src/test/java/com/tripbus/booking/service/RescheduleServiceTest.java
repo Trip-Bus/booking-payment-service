@@ -1,10 +1,12 @@
 package com.tripbus.booking.service;
 
 import com.tripbus.booking.client.CatalogClient;
+import com.tripbus.booking.client.FlashOffersClient;
 import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.common.events.EventPublisher;
 import com.tripbus.booking.config.BookingProperties;
+import com.tripbus.booking.config.NoShowProperties;
 import com.tripbus.booking.domain.Booking;
 import com.tripbus.booking.domain.BookingStatus;
 import com.tripbus.booking.domain.Passenger;
@@ -51,6 +53,7 @@ class RescheduleServiceTest {
     private final TicketRepository tickets = mock(TicketRepository.class);
     private final SeatInventoryClient seatInventory = mock(SeatInventoryClient.class);
     private final CatalogClient catalog = mock(CatalogClient.class);
+    private final FlashOffersClient flashOffers = mock(FlashOffersClient.class);
     private final BookingService bookingService = mock(BookingService.class);
     private final PaymentService paymentService = mock(PaymentService.class);
     private final TransactionTemplate tx = mock(TransactionTemplate.class);
@@ -81,9 +84,14 @@ class RescheduleServiceTest {
     }
 
     private RescheduleService servicio(BigDecimal cargo) {
-        return new RescheduleService(bookings, passengers, tickets, seatInventory, catalog, bookingService,
-                paymentService, mock(SagaLogger.class), mock(EventPublisher.class), tx,
-                new BookingProperties(null, null, null, null, "s", null, null, cargo), Clock.fixed(AHORA, ZoneOffset.UTC));
+        return servicio(cargo, NoShowProperties.defaults());
+    }
+
+    private RescheduleService servicio(BigDecimal cargo, NoShowProperties noShow) {
+        return new RescheduleService(bookings, passengers, tickets, seatInventory, catalog, flashOffers,
+                bookingService, paymentService, mock(SagaLogger.class), mock(EventPublisher.class), tx,
+                new BookingProperties(null, null, null, null, "s", null, null, cargo), noShow,
+                Clock.fixed(AHORA, ZoneOffset.UTC));
     }
 
     private Booking confirmada(UUID origenId) {
@@ -363,5 +371,145 @@ class RescheduleServiceTest {
         assertThat(result.created()).isFalse();
         assertThat(result.booking().bookingId()).isEqualTo(ganadora.getId());
         verify(paymentService, never()).confirmAndIssue(eq(ganadora.getId()));
+    }
+
+    // ------------------------------------------------------------------ US-153: no-show
+
+    @Test
+    void noShowDentroDeLaVentanaPagaLaDiferenciaMasElCargoDelVeintePorCiento() {
+        tiquete(origen, "NO_SHOW");
+        viaje(origen.getItineraryId(), "Bogotá", "Medellín", EMPRESA, AHORA.minus(Duration.ofHours(2)), "PROGRAMADO");
+
+        service.reschedule(origen.getId(), retencionValida(), dueno, null);
+
+        // 120000 − 95000 de diferencia + 20 % de 95000 (19000).
+        Booking nueva = creada();
+        assertThat(nueva.getTotal()).isEqualByComparingTo("44000");
+        assertThat(nueva.getEstado()).isEqualTo(BookingStatus.PENDIENTE_PAGO);
+        assertThat(nueva.getOrigen()).isEqualToIgnoringWhitespace("bogotá");
+        assertThat(RescheduleService.cargoNoShow(new BigDecimal("33333"), BigDecimal.valueOf(20)))
+                .isEqualByComparingTo("6666.60");
+    }
+
+    @Test
+    void noShowConViajeMasBaratoPagaSoloElCargo() {
+        tiquete(origen, "NO_SHOW");
+        viaje(origen.getItineraryId(), "Bogotá", "Medellín", EMPRESA, AHORA.minus(Duration.ofHours(23)), "PROGRAMADO");
+        precio("80000", "COP");
+
+        service.reschedule(origen.getId(), retencionValida(), dueno, null);
+
+        assertThat(creada().getTotal()).isEqualByComparingTo("19000");
+    }
+
+    @Test
+    void noShowFueraDeLaVentanaOConLaPoliticaApagadaNoSePuede() {
+        tiquete(origen, "NO_SHOW");
+        viaje(origen.getItineraryId(), "Bogotá", "Medellín", EMPRESA, AHORA.minus(Duration.ofHours(25)), "PROGRAMADO");
+        UUID holdId = retencionValida();
+
+        esperarError(holdId, HttpStatus.CONFLICT, "NO_SHOW_WINDOW_CLOSED");
+
+        service = servicio(BigDecimal.ZERO, new NoShowProperties(null, false, null, null));
+        esperarError(holdId, HttpStatus.CONFLICT, "NO_SHOW_RESCHEDULE_DISABLED");
+        verify(bookings, never()).save(any());
+    }
+
+    @Test
+    void unaAfectadaEnNoShowNoSeReprogramaGratis() {
+        tiquete(origen, "NO_SHOW");
+        UUID holdId = retencionValida();
+
+        assertThatThrownBy(() -> service.rescheduleAffected(origen, holdId, dueno))
+                .isInstanceOfSatisfying(ApiException.class,
+                        e -> assertThat(e.getCode()).isEqualTo("TICKET_NOT_RESCHEDULABLE"));
+    }
+
+    // ------------------------------------------------------------------ US-166: tarifa de oferta
+
+    private Booking confirmadaDeOferta(UUID offerId) {
+        Booking b = new Booking(UUID.randomUUID(), userId, UUID.randomUUID(), offerId, List.of("12"),
+                new BigDecimal("60000"), "COP", AHORA, "ana@mail.co", EMPRESA, AHORA);
+        b.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, AHORA);
+        b.cambiarEstado(BookingStatus.PAGO_APROBADO, AHORA);
+        b.cambiarEstado(BookingStatus.CONFIRMADA, AHORA);
+        when(bookings.findById(b.getId())).thenReturn(Optional.of(b));
+        when(bookings.lockById(b.getId())).thenReturn(Optional.of(b));
+        tiquete(b, "EMITIDO");
+        when(passengers.findByBookingId(b.getId())).thenReturn(List.of(new Passenger(b.getId(), "Ana", "CC", "1020", "12")));
+        viaje(b.getItineraryId(), "Bogotá", "Medellín", EMPRESA, AHORA.plus(Duration.ofDays(2)), "PROGRAMADO");
+        return b;
+    }
+
+    private void oferta(UUID offerId, Boolean permite) {
+        when(flashOffers.offer(offerId)).thenReturn(new FlashOffersClient.OfferDetails(offerId, null, EMPRESA,
+                new BigDecimal("60000"), new BigDecimal("95000"), permite));
+    }
+
+    @Test
+    void ofertaQueNoPermiteReprogramarEs409SinTocarLaRetencion() {
+        UUID offerId = UUID.randomUUID();
+        Booking deOferta = confirmadaDeOferta(offerId);
+        oferta(offerId, false);
+        UUID holdId = retencionValida();
+
+        assertThatThrownBy(() -> service.reschedule(deOferta.getId(), holdId, dueno, null))
+                .isInstanceOfSatisfying(ApiException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(e.getCode()).isEqualTo("OFFER_FARE_NOT_RESCHEDULABLE");
+                });
+        verify(seatInventory, never()).getHold(any());
+    }
+
+    @Test
+    void ofertaQuePermiteReprogramarOSinLaReglaSiSePuede() {
+        UUID offerId = UUID.randomUUID();
+        Booking deOferta = confirmadaDeOferta(offerId);
+        oferta(offerId, true);
+
+        assertThat(service.reschedule(deOferta.getId(), retencionValida(), dueno, null).created()).isTrue();
+
+        oferta(offerId, null);
+        assertThat(service.reschedule(deOferta.getId(), retencionValida(), dueno, null).created()).isTrue();
+    }
+
+    @Test
+    void siFlashOffersNoRespondeEs503() {
+        UUID offerId = UUID.randomUUID();
+        Booking deOferta = confirmadaDeOferta(offerId);
+        when(flashOffers.offer(offerId)).thenThrow(ApiException.unavailable("OFFERS_UNAVAILABLE", "caído"));
+        UUID holdId = retencionValida();
+
+        assertThatThrownBy(() -> service.reschedule(deOferta.getId(), holdId, dueno, null))
+                .isInstanceOfSatisfying(ApiException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(e.getCode()).isEqualTo("OFFERS_UNAVAILABLE");
+                });
+    }
+
+    @Test
+    void unNoShowDeOfertaNuncaSeReprogramaNiConsultaFlashOffers() {
+        UUID offerId = UUID.randomUUID();
+        Booking deOferta = confirmadaDeOferta(offerId);
+        tiquete(deOferta, "NO_SHOW");
+        UUID holdId = retencionValida();
+
+        assertThatThrownBy(() -> service.reschedule(deOferta.getId(), holdId, dueno, null))
+                .isInstanceOfSatisfying(ApiException.class,
+                        e -> assertThat(e.getCode()).isEqualTo("OFFER_FARE_NOT_RESCHEDULABLE"));
+        verify(flashOffers, never()).offer(any());
+    }
+
+    @Test
+    void unaAfectadaDeOfertaSiempreSePuedeReprogramarGratis() {
+        UUID offerId = UUID.randomUUID();
+        Booking deOferta = confirmadaDeOferta(offerId);
+        oferta(offerId, false);
+        precio("150000", "COP");
+
+        assertThat(service.rescheduleAffected(deOferta, retencionValida(), dueno).created()).isTrue();
+
+        assertThat(creada().getTotal()).isEqualByComparingTo("0");
+        verify(flashOffers, never()).offer(any());
     }
 }

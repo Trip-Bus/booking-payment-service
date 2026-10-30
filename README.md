@@ -2,12 +2,13 @@
 
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=Trip-Bus_booking-payment-service&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=Trip-Bus_booking-payment-service)
 
-Orquesta la compra: datos del viajero, total, pago con tarjeta (sandbox), tiquete con QR,
-idempotencia y saga de compra con compensaciones.
+Orquesta la compra: datos del viajero, total, pago con tarjeta, PSE o Nequi (sandbox) o en efectivo en taquilla,
+tiquete con QR (y en PDF), idempotencia y saga de compra con compensaciones.
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Redis 7
 
-**HU:** US-031, US-032, US-033, US-034, US-150, US-139, US-152, US-154, US-155, US-172 · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
+**HU:** US-031, US-032, US-033, US-034, US-150, US-139, US-152, US-154, US-155, US-172, US-143, US-144, US-145,
+US-153, US-166 (lado de booking) · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
 
 ## API
 
@@ -16,6 +17,11 @@ idempotencia y saga de compra con compensaciones.
 | POST | `/bookings` `{holdId, pasajeros:[{nombre, tipoDocumento, numeroDocumento}]}` | Crea la reserva y calcula el total (Catalog o Flash Offers). |
 | POST | `/bookings/{id}/pay` + header **`Idempotency-Key`** `{cardToken, cardLast4}` | Inicia el pago (202). Reintentos con la misma llave devuelven la misma respuesta. |
 | GET | `/bookings` · `/bookings/{id}` · `/bookings/{id}/saga` | Mis reservas, detalle y bitácora de la saga. |
+| GET | `/bookings?scope=proximos\|pasados&page=0&size=10` | **US-145**: mis viajes próximos o pasados, paginado (ver abajo). |
+| POST | `/box-office/sales` + header **`Idempotency-Key`** `{itineraryId, seatNumbers, pasajeros, comprador:{nombre, email?, telefono?}}` | **US-144** (OPERADOR): venta en taquilla con pago en efectivo. 201 con la reserva `CONFIRMADA` y su tiquete. |
+| GET | `/box-office/sales?fecha=YYYY-MM-DD&vendedor=` | **US-144**: cierre de caja del día (OPERADOR: el suyo o el de otro vendedor de su empresa; ADMIN: todas). |
+| POST | `/tickets/{id}/resend` | **US-145**: reenvía el tiquete al correo de la reserva (202). Máximo 3 por día → `429 RESEND_LIMIT_REACHED`. |
+| GET | `/tickets/{id}/pdf` | **US-145**: tiquete en PDF con el QR, el viaje, los pasajeros y los asientos (dueño, OPERADOR de la empresa, ADMIN). |
 | POST | `/bookings/{id}/reschedule` `{holdId}` | **US-150** (dueño): reprograma a otro viaje con los asientos de la retención. 201 con la reserva nueva (`PENDIENTE_PAGO` si hay diferencia, `CONFIRMADA` si no); 200 si esa retención ya se usó para esto. |
 | GET | `/tickets/{id}` · `/tickets/{id}/qr.png` | Tiquete con QR firmado (data URI / PNG). |
 | POST | `/tickets/validate` `{qrCode}` | Validación al abordar (CONDUCTOR/OPERADOR/ADMIN). |
@@ -36,10 +42,19 @@ indica de qué reserva viene una reprogramación.
 (pago aprobado pero el asiento ya no se pudo confirmar). Cada paso queda en `saga_log`; un job
 retoma las sagas interrumpidas y otro concilia reservas/pagos/tiquetes cada 15 min.
 `CONFIRMADA → REPROGRAMADA` (US-150): se confirmó la reserva nueva que la reemplaza.
+En taquilla (US-144) la reserva recorre los mismos estados en un instante: el pago `EFECTIVO` se aprueba sin pasarela.
 
-Estados del tiquete: `EMITIDO`, `USADO`, `REPROGRAMADO` (se cambió por el de una reserva nueva) y `ANULADO`.
-`POST /tickets/validate` responde `409 TICKET_RESCHEDULED` para uno REPROGRAMADO, `409 TICKET_VOIDED` para uno
-ANULADO y `valido: false, motivo: QR_REEMPLAZADO` para un QR que un cambio de asiento reemplazó.
+Estados del tiquete:
+
+| Estado | Significado | Al abordar (`POST /tickets/validate`) |
+|---|---|---|
+| `EMITIDO` | Vigente, pendiente de abordar. | Válido una sola vez (pasa a `USADO`). |
+| `USADO` | Abordó. | `valido: false, motivo: YA_USADO`. |
+| `REPROGRAMADO` | Se cambió por el de una reserva nueva (US-150). | `409 TICKET_RESCHEDULED`. |
+| `ANULADO` | Reembolsado por un cambio de la empresa (US-154). | `409 TICKET_VOIDED`. |
+| `NO_SHOW` | El viaje salió hace más de 30 min y no abordó (US-153). Sin reembolso. | `valido: false, motivo: NO_SHOW`. |
+
+Un QR que un cambio de asiento reemplazó responde `valido: false, motivo: QR_REEMPLAZADO`.
 
 ### Reprogramar el tiquete (US-150)
 
@@ -48,8 +63,10 @@ el `POST /seats/holds` normal y llama a `POST /bookings/{id}/reschedule {holdId}
 
 | Código | Regla |
 |---|---|
-| `BOOKING_NOT_RESCHEDULABLE` / `TICKET_NOT_RESCHEDULABLE` | La reserva debe estar `CONFIRMADA` y su tiquete `EMITIDO` (no usado). |
+| `BOOKING_NOT_RESCHEDULABLE` / `TICKET_NOT_RESCHEDULABLE` | La reserva debe estar `CONFIRMADA` y su tiquete `EMITIDO` (no usado) o `NO_SHOW` (US-153, ver abajo). |
 | `RESCHEDULE_WINDOW_CLOSED` | Deben faltar más de `tripbus.booking.reschedule-cutoff` (3 h) para la salida del viaje original. |
+| `OFFER_FARE_NOT_RESCHEDULABLE` · `503 OFFERS_UNAVAILABLE` | **US-166**: si la reserva es de oferta, flash-offers (`GET /internal/offers/{id}`) debe permitir reprogramar; si no responde, 503. |
+| `NO_SHOW_WINDOW_CLOSED` · `NO_SHOW_RESCHEDULE_DISABLED` | **US-153**: un no-show se reprograma dentro de la ventana y si la política está activa. |
 | `RESCHEDULE_LIMIT_REACHED` | Máximo `tripbus.booking.max-reschedules` (2) en toda la cadena de reprogramaciones. |
 | `RESCHEDULE_IN_PROGRESS` | Ya hay una reprogramación viva de esa reserva (también lo impide un índice único en la BD). |
 | `HOLD_NOT_OWNED` · `HOLD_NOT_ACTIVE` · `SEATS_PASSENGERS_MISMATCH` · `SAME_ITINERARY` · `HOLD_ALREADY_USED` | La retención es del mismo usuario, está activa, tiene un asiento por pasajero y es de otro viaje. |
@@ -174,6 +191,65 @@ otro rol → `403`. Por pasajero: nombre, tipo y número de documento, asiento, 
 cuándo, qué viaje, formato y si se permitió) queda en `manifest_access_log`. El CSV escapa comas y comillas y
 antepone `'` a los valores que empiezan por `= + - @` (inyección de fórmulas).
 
+### Datos del viaje en la reserva
+
+Al crear la reserva (app, taquilla o reprogramación) se copian de catalog `origen`, `destino`, `fecha_salida` y
+`empresa_nombre`, junto con el `canal` (`APP` | `TAQUILLA`). Así "mis viajes", el cierre de caja y el job de no-show no
+consultan a catalog por cada reserva. Las reservas anteriores las rellena `TripDataBackfill` al arrancar (idempotente:
+solo las que no tienen `fecha_salida`); si catalog no responde, quedan para el siguiente arranque. `ItineraryRescheduled`
+actualiza `fecha_salida` de todas las reservas del viaje.
+
+### Venta en taquilla (US-144)
+
+`POST /box-office/sales` (solo OPERADOR, con `Idempotency-Key` igual que el pago: repetirla devuelve la misma venta y
+con otro cuerpo responde `422 IDEMPOTENCY_KEY_REUSED`):
+
+1. El viaje debe ser de la empresa del operador (si no, `404 ITINERARY_NOT_FOUND`), no estar cancelado
+   (`409 ITINERARY_CANCELLED`) ni haber salido (`409 ITINERARY_DEPARTED`). Un pasajero por asiento.
+2. Retiene los asientos en seat-inventory (`POST /internal/holds`) **a nombre del operador**.
+3. En una transacción: reserva `canal = TAQUILLA` con `vendido_por` (el operador) y los datos del comprador, y un pago
+   `EFECTIVO` aprobado al instante (sin pasarela). Luego confirma la venta en seat-inventory y emite el tiquete con el
+   mismo paso de la saga de la app. Cada paso queda en `saga_log` (`RESERVA_CREADA`, `PAGO_EFECTIVO_APROBADO`,
+   `ASIENTO_VENDIDO`, `TIQUETE_EMITIDO`). Si el asiento se perdió al confirmar, la reserva queda `REEMBOLSADA` (se
+   devuelve el efectivo; la pasarela no interviene).
+4. Si el correo del comprador es de un PASAJERO registrado (identity `GET /internal/users/by-email`), la reserva queda a
+   su nombre y aparece en sus viajes; si no (o identity no responde), queda a nombre del operador. Si dio correo, se le
+   envía el tiquete como en la app.
+
+El tiquete de taquilla se valida al abordar igual que uno de la app. `GET /box-office/sales?fecha=` (hoy por defecto,
+hora de Colombia) es el cierre de caja: ventas, tiquetes, asientos, `totalEfectivo` y `totalReembolsado`. El OPERADOR ve
+las suyas o, con `?vendedor=`, las de otro vendedor de su empresa; el ADMIN ve todas o las de `?vendedor=`.
+
+### Mis viajes, reenvío y PDF (US-145)
+
+`GET /bookings?scope=proximos|pasados` (paginado, `size` hasta 50): **próximos** son los de salida hoy (hora de Colombia)
+o después, de la más cercana a la más lejana; **pasados**, el resto, de la más reciente a la más vieja. Solo reservas
+`CONFIRMADA`, `REPROGRAMADA` y `REEMBOLSADA`, con su estado visible. Cada viaje trae origen, destino, salida, empresa,
+asientos, estado del tiquete, canal y si hoy se podría reprogramar (`puedeReprogramar`) o cambiar de asiento
+(`puedeCambiarAsiento`). La regla de la tarifa de oferta se valida con flash-offers al reprogramar.
+
+`POST /tickets/{id}/resend` reenvía el tiquete al correo de la reserva: máximo 3 por día (UPDATE atómico; el cuarto
+responde `429 RESEND_LIMIT_REACHED`). `409 TICKET_NOT_RESENDABLE` si está `REPROGRAMADO` o `ANULADO`,
+`409 NO_CONTACT_EMAIL` sin correo y `503 MAIL_UNAVAILABLE` sin SMTP. `GET /tickets/{id}/pdf` genera el PDF (OpenPDF,
+LGPL/MPL) con el número de tiquete, el QR, el viaje, los pasajeros y los asientos. Ambos solo para el dueño, el OPERADOR
+de la empresa del viaje y el ADMIN; para cualquier otro el tiquete no existe (404).
+
+### No-show (US-153)
+
+Cada 5 min, en un solo nodo, `NoShowJob` pasa a `NO_SHOW` los tiquetes `EMITIDO` de viajes que salieron hace más de
+`tripbus.booking.no-show-after` (30 min) y publica `TicketNoShow {userId, bookingId, ticketId, itineraryId}`. **No hay
+reembolso.** No aplica a reservas afectadas por la empresa pendientes de decisión ni a viajes cancelados. Un no-show se
+puede reprogramar con el flujo de US-150 si `tripbus.booking.no-show-reschedule-enabled` (true), dentro de
+`tripbus.booking.no-show-reschedule-window` (24 h) después de la salida, pagando la diferencia de precio más
+`tripbus.booking.no-show-fee-percent` (20 %) del total pagado. Un tiquete de oferta en no-show no se reprograma.
+
+### Tarifa de oferta (US-166, lado de booking)
+
+Al reprogramar (US-150 y no-show), si la reserva tiene `offer_id` se consulta flash-offers `GET /internal/offers/{id}`
+(con `X-Internal-Token`): `permiteReprogramar = false` → `409 OFFER_FARE_NOT_RESCHEDULABLE`; si flash-offers no responde
+→ `503 OFFERS_UNAVAILABLE`. Las reservas **afectadas por la empresa** (US-154) siempre se pueden reprogramar gratis o
+reembolsar, aunque sean de oferta: el pasajero no tiene la culpa.
+
 ## Flujo de ramas y entornos
 
 ```
@@ -285,7 +361,9 @@ no arranca y dice cuáles faltan (`RequiredSecretsCheck`).
 
 Opcionales con valor por defecto: `SERVER_PORT` (18004), `DB_HOST` (localhost), `DB_PORT` (18104),
 `DB_NAME` (tripbus_booking), `DB_USERNAME` (booking), `DB_POOL_SIZE`, `REDIS_HOST` (localhost),
-`REDIS_PORT` (18100), `PAYMENT_DUPLICATE_WEBHOOK` (solo IDE; en qa/prod lo fija el perfil).
+`REDIS_PORT` (18100), `PAYMENT_DUPLICATE_WEBHOOK` (solo IDE; en qa/prod lo fija el perfil), `IDENTITY_URL`
+(`http://localhost:18001`; si identity no responde, la venta en taquilla queda a nombre del operador),
+`NO_SHOW_RESCHEDULE_ENABLED` (true) y `TRIP_BACKFILL_ENABLED` (true).
 `DB_HOST` reemplaza a la antigua `DB_URL`.
 
 Tiquete por correo (US-033, opcionales en todos los entornos): `MAIL_HOST` (vacío = envío
@@ -340,6 +418,12 @@ mvn -B verify      # unitarias + integración con PostgreSQL y Redis reales (Tes
   (reubicación) y sin cupo (reembolso, y sin catalog sigue pendiente); manifiesto por rol, CSV, otra empresa → 404 y
   registro de accesos. Las reglas una a una están en `AffectedBookingServiceTest`, `AffectedRefundServiceTest`,
   `AffectedBookingJobTest`, `ManifestServiceTest` y `AffectedMailServiceTest`.
+- `TaquillaYMisViajesIT` (Sprint 4, con SMTP en memoria): venta en taquilla con y sin cuenta del comprador, de otra
+  empresa, cancelada o que ya salió, `Idempotency-Key` repetida, efectivo devuelto sin pasarela y cierre de caja por
+  vendedor; mis viajes próximos y pasados; reenvío por encima del límite; PDF con el número de tiquete; no-show por el
+  job; reprogramar un no-show dentro y fuera de plazo; oferta no reprogramable (y sin flash-offers) y afectada de
+  oferta que sí se puede; relleno de los datos del viaje. Las reglas una a una están en `BoxOfficeServiceTest`,
+  `MyTripsServiceTest`, `TicketDocumentServiceTest`, `NoShowJobTest`, `RescheduleServiceTest` y `ClientesSprint4Test`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 

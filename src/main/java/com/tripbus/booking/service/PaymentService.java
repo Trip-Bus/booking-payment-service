@@ -467,7 +467,9 @@ public class PaymentService {
                     .filter(p -> p.getEstado() == PaymentStatus.APROBADO).findFirst().orElse(null);
             Instant now = clock.instant();
             if (payment != null && refundRepository.findByPaymentId(payment.getId()).isEmpty()) {
-                gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
+                if (!payment.enEfectivo()) {
+                    gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
+                }
                 Refund refund = refundRepository.save(new Refund(payment.getId(), payment.getMonto(), motivo, now));
                 payment.reembolsar(now);
                 Map<String, Object> payload = new LinkedHashMap<>();

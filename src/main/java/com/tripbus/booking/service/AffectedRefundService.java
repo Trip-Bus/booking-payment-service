@@ -139,7 +139,9 @@ public class AffectedRefundService {
         if (refundRepository.findByPaymentId(payment.getId()).isPresent()) {
             return;
         }
-        gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
+        if (!payment.enEfectivo()) {
+            gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
+        }
         Refund refund = refundRepository.save(new Refund(payment.getId(), payment.getMonto(), "AFECTADA_POR_LA_EMPRESA",
                 now));
         payment.reembolsar(now);

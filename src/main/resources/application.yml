@@ -95,6 +95,18 @@ tripbus:
     # minutos; el pasajero tiene affected-decision-window para elegir (después decide el sistema).
     affected-delay-min: 60
     affected-decision-window: 24h
+    # US-144: identity dice si el comprador en taquilla tiene cuenta (por su correo). Opcional: si no responde,
+    # la venta queda a nombre del operador.
+    identity-url: ${IDENTITY_URL:http://localhost:18001}
+    # US-153: un tiquete EMITIDO pasa a NO_SHOW cuando el viaje salió hace más de no-show-after. Se puede
+    # reprogramar dentro de no-show-reschedule-window después de la salida, con un cargo de no-show-fee-percent
+    # del total pagado (además de la diferencia de precio). Los de oferta no.
+    no-show-after: 30m
+    no-show-reschedule-enabled: ${NO_SHOW_RESCHEDULE_ENABLED:true}
+    no-show-reschedule-window: 24h
+    no-show-fee-percent: 20
+    # US-145: al arrancar se rellenan los datos del viaje de las reservas que aún no los tienen.
+    trip-backfill-enabled: ${TRIP_BACKFILL_ENABLED:true}
   payment:
     webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:18004/webhooks/payment}
     webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus_webhook_qa_secret}

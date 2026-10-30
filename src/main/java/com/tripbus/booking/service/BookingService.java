@@ -105,9 +105,11 @@ public class BookingService {
         try {
             BookingResponse response = tx.execute(status -> {
                 Instant now = clock.instant();
-                Booking booking = bookingRepository.save(new Booking(hold.holdId(), userId, hold.itineraryId(),
-                        hold.offerId(), hold.seatNumbers(), precio.unitario(), precio.moneda(), hold.expiraEn(),
-                        emailContacto, companyId, now));
+                Booking nueva = new Booking(hold.holdId(), userId, hold.itineraryId(), hold.offerId(),
+                        hold.seatNumbers(), precio.unitario(), precio.moneda(), hold.expiraEn(), emailContacto,
+                        companyId, now);
+                nueva.asignarViaje(viajeDe(itinerario));
+                Booking booking = bookingRepository.save(nueva);
                 for (int i = 0; i < request.pasajeros().size(); i++) {
                     PassengerRequest p = request.pasajeros().get(i);
                     passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
@@ -183,6 +185,24 @@ public class BookingService {
                 saga.log(booking.getId(), "RETENCION_EXPIRADA", "OK", Map.of("holdId", holdId));
             }
         });
+    }
+
+    /**
+     * ItineraryRescheduled: la nueva salida queda en todas las reservas del viaje (mis viajes, no-show y
+     * reprogramaciones se calculan con ella). Devuelve cuántas reservas se actualizaron.
+     */
+    @Transactional
+    public int onItineraryRescheduled(UUID itineraryId, Instant nuevaSalida) {
+        return nuevaSalida == null ? 0 : bookingRepository.actualizarSalida(itineraryId, nuevaSalida);
+    }
+
+    /** US-145: datos del viaje que se guardan en la reserva (null si catalog no respondió). */
+    static Booking.Viaje viajeDe(CatalogClient.ItinerarySummary itinerario) {
+        if (itinerario == null) {
+            return null;
+        }
+        return new Booking.Viaje(itinerario.origen(), itinerario.destino(), itinerario.fechaSalida(),
+                itinerario.empresa());
     }
 
     private BookingResponse existingFor(Booking booking, UUID userId) {

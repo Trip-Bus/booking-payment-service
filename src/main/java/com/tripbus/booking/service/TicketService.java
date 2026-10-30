@@ -38,6 +38,7 @@ public class TicketService {
     static final String USADO = "USADO";
     static final String REPROGRAMADO = "REPROGRAMADO";
     static final String ANULADO = "ANULADO";
+    static final String NO_SHOW = "NO_SHOW";
     private static final String VALIDO = "valido";
     private static final String MOTIVO = "motivo";
     private static final String ESTADO = "estado";
@@ -156,6 +157,8 @@ public class TicketService {
             case REPROGRAMADO -> throw ApiException.conflict("TICKET_RESCHEDULED",
                     "El tiquete se reprogramó a otro viaje; presente el tiquete nuevo");
             case ANULADO -> throw ApiException.conflict("TICKET_VOIDED", "El tiquete fue anulado");
+            // US-153: el viaje salió y el pasajero no abordó; el tiquete ya no sirve para abordar.
+            case NO_SHOW -> Map.of(VALIDO, false, MOTIVO, "NO_SHOW");
             case EMITIDO -> Map.of(VALIDO, false, MOTIVO, "QR_REEMPLAZADO");
             default -> Map.of(VALIDO, false, MOTIVO, "TIQUETE_NO_VALIDO", ESTADO, t.getEstado());
         };

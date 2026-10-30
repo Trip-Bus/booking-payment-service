@@ -8,6 +8,8 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -32,8 +34,41 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
      * misma fila: o se aborda con el tiquete viejo o se reprograma, nunca las dos cosas.
      */
     @Modifying(flushAutomatically = true)
-    @Query("UPDATE Ticket t SET t.estado = 'REPROGRAMADO' WHERE t.id = :id AND t.estado = 'EMITIDO'")
+    @Query("UPDATE Ticket t SET t.estado = 'REPROGRAMADO' WHERE t.id = :id AND t.estado IN ('EMITIDO', 'NO_SHOW')")
     int marcarReprogramado(@Param("id") UUID id);
+
+    /** US-153: el pasajero no abordó; solo si el tiquete sigue EMITIDO (compite con el abordaje). */
+    @Modifying(flushAutomatically = true)
+    @Query("UPDATE Ticket t SET t.estado = 'NO_SHOW' WHERE t.id = :id AND t.estado = 'EMITIDO'")
+    int marcarNoShow(@Param("id") UUID id);
+
+    /**
+     * US-153: tiquetes EMITIDO de reservas CONFIRMADA cuyo viaje salió antes de {@code salioAntes}. No incluye las
+     * reservas afectadas por la empresa que siguen pendientes o cuyo viaje se canceló (el pasajero no tiene la culpa).
+     */
+    @Query("select t.id from Ticket t, Booking b where b.id = t.bookingId and t.estado = 'EMITIDO' "
+            + "and b.estado = com.tripbus.booking.domain.BookingStatus.CONFIRMADA and b.fechaSalida < :salioAntes "
+            + "and not exists (select a.bookingId from AffectedBooking a where a.bookingId = b.id "
+            + "and (a.estado = com.tripbus.booking.domain.AffectedBooking.Estado.PENDIENTE "
+            + "or a.causa = com.tripbus.booking.domain.AffectedBooking.Causa.CANCELACION)) order by b.fechaSalida")
+    List<UUID> findIdsParaNoShow(@Param("salioAntes") Instant salioAntes);
+
+    /**
+     * US-145: cuenta un reenvío del tiquete en el día {@code hoy} (hora de Colombia) si aún no llega a {@code maximo}.
+     * Es un UPDATE condicional atómico: con reenvíos simultáneos nunca se pasa del máximo. Devuelve 0 si ya llegó.
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(value = "UPDATE tickets SET reenvios_hoy = CASE WHEN reenvios_fecha = :hoy THEN reenvios_hoy + 1 ELSE 1 END, "
+            + "reenvios_fecha = :hoy WHERE id = :id "
+            + "AND (reenvios_fecha IS NULL OR reenvios_fecha <> :hoy OR reenvios_hoy < :maximo)", nativeQuery = true)
+    int registrarReenvio(@Param("id") UUID id, @Param("hoy") LocalDate hoy, @Param("maximo") int maximo);
+
+    /** US-145: reenvíos que lleva hoy el tiquete (0 si el último fue otro día). */
+    @Query(value = "SELECT CASE WHEN reenvios_fecha = :hoy THEN reenvios_hoy ELSE 0 END FROM tickets WHERE id = :id",
+            nativeQuery = true)
+    int reenviosDe(@Param("id") UUID id, @Param("hoy") LocalDate hoy);
+
+    List<Ticket> findByBookingIdIn(Collection<UUID> bookingIds);
 
     /**
      * US-139: QR nuevo para un tiquete EMITIDO (el anterior deja de validar). Se reinicia la notificación para

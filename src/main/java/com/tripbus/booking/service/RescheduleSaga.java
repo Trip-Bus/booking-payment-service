@@ -65,7 +65,8 @@ public class RescheduleSaga {
         Booking origen = bookingRepository.findById(nueva.getOrigenBookingId()).orElse(null);
         return origen != null && origen.getEstado() == BookingStatus.CONFIRMADA
                 && ticketRepository.findByBookingId(origen.getId())
-                .map(t -> TicketService.EMITIDO.equals(t.getEstado())).orElse(false);
+                .map(t -> TicketService.EMITIDO.equals(t.getEstado()) || TicketService.NO_SHOW.equals(t.getEstado()))
+                .orElse(false);
     }
 
     /**
