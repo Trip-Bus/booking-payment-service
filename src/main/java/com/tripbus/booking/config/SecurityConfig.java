@@ -31,7 +31,10 @@ public class SecurityConfig {
                         .requestMatchers("/internal/**").hasRole(InternalTokenFilter.INTERNAL_ROLE)
                         // La pasarela llama el webhook sin JWT: se autentica con la firma HMAC.
                         .requestMatchers(HttpMethod.POST, "/webhooks/payment").permitAll()
-                        .requestMatchers("/sandbox/pse/**", "/payments/pse/banks").permitAll()
+                        // Banco de pruebas PSE: el navegador del pasajero llega redirigido, sin JWT. Solo se abren
+                        // los métodos que usa la página y un único segmento (el id aleatorio del cobro).
+                        .requestMatchers(HttpMethod.GET, "/payments/pse/banks", "/sandbox/pse/*").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/sandbox/pse/*").permitAll()
                         // Swagger (en prod springdoc está apagado y estas rutas dan 404) y página de error.
                         .requestMatchers(HttpMethod.GET, "/v3/api-docs/**", "/swagger-ui/**",
                                 "/swagger-ui.html").permitAll()

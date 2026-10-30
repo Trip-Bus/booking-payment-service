@@ -361,6 +361,39 @@ class BookingSagaIT {
                 .andExpect(status().isOk());
     }
 
+    @Test
+    void elBancoDePruebaPseEsPublicoSoloEnSusRutasYMetodos() throws Exception {
+        mvc.perform(get("/payments/pse/banks")).andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].codigo").value("1"));
+        // Sin JWT llega al controlador (404: no existe ese cobro), no se queda en la seguridad (401).
+        mvc.perform(get("/sandbox/pse/sbx_inexistente")).andExpect(status().isNotFound());
+        mvc.perform(post("/sandbox/pse/sbx_inexistente").param("action", "approve"))
+                .andExpect(status().isNotFound());
+        mvc.perform(post("/sandbox/pse/sbx_inexistente").param("action", "borrar"))
+                .andExpect(status().isBadRequest());
+        // Otros métodos o rutas anidadas siguen exigiendo autenticación.
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .put("/sandbox/pse/sbx_inexistente")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/sandbox/pse/sbx_a/otra")).andExpect(status().isUnauthorized());
+        mvc.perform(post("/payments/pse/banks")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void pagoConMetodoNoSoportadoODatosDemasiadoLargosEs400() throws Exception {
+        UUID bookingId = UUID.fromString(crearReserva(nuevaRetencion()).get("bookingId").asText());
+
+        mvc.perform(post("/bookings/{id}/pay", bookingId).with(pasajero()).header("Idempotency-Key", "metodo-malo-01")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"metodo\":\"bitcoin\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("INVALID_PAYMENT_METHOD"));
+        mvc.perform(post("/bookings/{id}/pay", bookingId).with(pasajero()).header("Idempotency-Key", "pse-largo-0001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"metodo\":\"PSE\",\"pse\":{\"bancoCodigo\":\"1\",\"tipoPersona\":\"NATURAL\","
+                                + "\"numeroDocumento\":\"" + "9".repeat(50) + "\"}}"))
+                .andExpect(status().isBadRequest());
+        verify(gateway, never()).charge(any(), any(), anyString(), anyString());
+    }
+
     private RequestPostProcessor operador(UUID empresa) {
         return jwt().jwt(j -> j.subject(UUID.randomUUID().toString()).claim("role", "OPERADOR")
                         .claim("companyId", empresa.toString()))

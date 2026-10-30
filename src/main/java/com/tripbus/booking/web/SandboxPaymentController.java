@@ -49,6 +49,7 @@ public class SandboxPaymentController {
     @PostMapping("/sandbox/pse/{gatewayPaymentId}")
     public ResponseEntity<Void> decide(@PathVariable String gatewayPaymentId, @RequestParam String action) {
         if (!properties.sandboxPagesEnabled()) return ResponseEntity.notFound().build();
+        if (!"approve".equals(action) && !"reject".equals(action)) return ResponseEntity.badRequest().build();
         Payment payment = payments.findByPaymentGatewayId(gatewayPaymentId).orElse(null);
         if (payment == null) return ResponseEntity.notFound().build();
         SandboxPaymentGateway sandbox = gateway.getIfAvailable();
