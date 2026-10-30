@@ -6,6 +6,11 @@ import com.tripbus.booking.service.AffectedBookingService;
 import com.tripbus.booking.service.BookingService;
 import org.springframework.stereotype.Component;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Set;
 import java.util.UUID;
 
@@ -49,13 +54,32 @@ public class BookingEventsHandler implements DomainEventHandler {
             }
             case BookingEvents.ITINERARY_RESCHEDULED -> {
                 if (payload.hasNonNull(ITINERARY_ID)) {
-                    affectedService.onItineraryRescheduled(UUID.fromString(payload.get(ITINERARY_ID).asText()),
-                            payload.path("tipo").asText(""), payload.path("minutosDiferencia").asLong(0));
+                    UUID itineraryId = UUID.fromString(payload.get(ITINERARY_ID).asText());
+                    bookingService.onItineraryRescheduled(itineraryId, instante(payload.path("fechaSalida")));
+                    affectedService.onItineraryRescheduled(itineraryId, payload.path("tipo").asText(""),
+                            payload.path("minutosDiferencia").asLong(0));
                 }
             }
             default -> {
                 // tipo no registrado en eventTypes(): no llega aquí
             }
         }
+    }
+
+    /** Fecha del evento: texto ISO-8601 o segundos desde epoch (según cómo la serialice catalog); null si no viene. */
+    static Instant instante(JsonNode value) {
+        if (value.isNumber()) {
+            BigDecimal segundos = value.decimalValue();
+            return Instant.ofEpochSecond(segundos.longValue(),
+                    segundos.remainder(BigDecimal.ONE).movePointRight(9).longValue());
+        }
+        if (value.isTextual()) {
+            try {
+                return Instant.parse(value.asText());
+            } catch (DateTimeParseException e) {
+                return null;
+            }
+        }
+        return null;
     }
 }

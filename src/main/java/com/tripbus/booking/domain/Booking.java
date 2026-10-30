@@ -99,6 +99,38 @@ public class Booking {
     @Column(name = "anulacion_resuelta_en")
     private Instant anulacionResueltaEn;
 
+    /** US-145: datos del viaje copiados de catalog (null mientras TripDataBackfill no los rellene). */
+    @Column(name = "origen")
+    private String origen;
+
+    @Column(name = "destino")
+    private String destino;
+
+    /** Salida del viaje; ItineraryRescheduled la actualiza. */
+    @Column(name = "fecha_salida")
+    private Instant fechaSalida;
+
+    @Column(name = "empresa_nombre")
+    private String empresaNombre;
+
+    /** US-144: APP (compra del pasajero) o TAQUILLA (venta en efectivo de un operador). */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Canal canal = Canal.APP;
+
+    /** US-144: operador que hizo la venta en taquilla (null en la app). */
+    @Column(name = "vendido_por")
+    private UUID vendidoPor;
+
+    @Column(name = "comprador_nombre")
+    private String compradorNombre;
+
+    @Column(name = "comprador_email")
+    private String compradorEmail;
+
+    @Column(name = "comprador_telefono")
+    private String compradorTelefono;
+
     @Column(name = "creado_en", nullable = false)
     private Instant creadoEn;
 
@@ -165,6 +197,45 @@ public class Booking {
     /** Asientos retenidos con los que se arma una reserva (los datos de la retención de seat-inventory). */
     public record SeatSelection(UUID holdId, UUID itineraryId, UUID offerId, List<String> seatNumbers,
                                 Instant holdExpiraEn) {
+    }
+
+    public enum Canal { APP, TAQUILLA }
+
+    /** US-145: datos del viaje que se guardan en la reserva. */
+    public record Viaje(String origen, String destino, Instant fechaSalida, String empresa) {
+    }
+
+    /** US-144: quién vendió en taquilla y los datos que dio el comprador (email y teléfono opcionales). */
+    public record VentaTaquilla(UUID vendidoPor, String compradorNombre, String compradorEmail,
+                                String compradorTelefono) {
+    }
+
+    /**
+     * US-144: venta en taquilla. La reserva queda a nombre de {@code userId} (el pasajero registrado con el correo
+     * del comprador, o el operador) y el tiquete se envía al correo del comprador si lo dio.
+     */
+    public static Booking taquilla(SeatSelection seleccion, UUID userId, VentaTaquilla venta, BigDecimal precioUnitario,
+                                   String moneda, UUID companyId, Instant now) {
+        Booking b = new Booking(seleccion.holdId(), userId, seleccion.itineraryId(), seleccion.offerId(),
+                seleccion.seatNumbers(), precioUnitario, moneda, seleccion.holdExpiraEn(), venta.compradorEmail(),
+                companyId, now);
+        b.canal = Canal.TAQUILLA;
+        b.vendidoPor = venta.vendidoPor();
+        b.compradorNombre = venta.compradorNombre();
+        b.compradorEmail = venta.compradorEmail();
+        b.compradorTelefono = venta.compradorTelefono();
+        return b;
+    }
+
+    /** US-145: copia los datos del viaje (los null no reemplazan lo que ya había). */
+    public void asignarViaje(Viaje viaje) {
+        if (viaje == null) {
+            return;
+        }
+        origen = viaje.origen() != null ? viaje.origen() : origen;
+        destino = viaje.destino() != null ? viaje.destino() : destino;
+        fechaSalida = viaje.fechaSalida() != null ? viaje.fechaSalida() : fechaSalida;
+        empresaNombre = viaje.empresa() != null ? viaje.empresa() : empresaNombre;
     }
 
     /** US-139: cambia {@code desde} por {@code hacia} en los asientos de la reserva (conserva el orden). */
@@ -261,6 +332,42 @@ public class Booking {
 
     public String getEmailContacto() {
         return emailContacto;
+    }
+
+    public String getOrigen() {
+        return origen;
+    }
+
+    public String getDestino() {
+        return destino;
+    }
+
+    public Instant getFechaSalida() {
+        return fechaSalida;
+    }
+
+    public String getEmpresaNombre() {
+        return empresaNombre;
+    }
+
+    public Canal getCanal() {
+        return canal;
+    }
+
+    public UUID getVendidoPor() {
+        return vendidoPor;
+    }
+
+    public String getCompradorNombre() {
+        return compradorNombre;
+    }
+
+    public String getCompradorEmail() {
+        return compradorEmail;
+    }
+
+    public String getCompradorTelefono() {
+        return compradorTelefono;
     }
 
     public Instant getCreadoEn() {

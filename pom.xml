@@ -28,6 +28,8 @@
         <postgresql.version>42.7.12</postgresql.version>
 
         <zxing.version>3.5.3</zxing.version>
+        <!-- US-145: PDF del tiquete. OpenPDF (LGPL-2.1 / MPL-2.0), sin dependencias obligatorias. -->
+        <openpdf.version>2.2.2</openpdf.version>
         <greenmail.version>2.1.3</greenmail.version>
         <springdoc.version>2.8.17</springdoc.version>
         <logstash-logback.version>8.0</logstash-logback.version>
@@ -156,6 +158,13 @@
             <groupId>com.google.zxing</groupId>
             <artifactId>javase</artifactId>
             <version>${zxing.version}</version>
+        </dependency>
+
+        <!-- US-145: tiquete en PDF. -->
+        <dependency>
+            <groupId>com.github.librepdf</groupId>
+            <artifactId>openpdf</artifactId>
+            <version>${openpdf.version}</version>
         </dependency>
 
         <!-- Swagger UI / OpenAPI (solo IDE y QA; apagado en application-prod.yml). -->

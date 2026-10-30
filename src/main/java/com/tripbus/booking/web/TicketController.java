@@ -3,12 +3,15 @@ package com.tripbus.booking.web;
 import com.tripbus.booking.common.security.CurrentUser;
 import com.tripbus.booking.service.BookingViewer;
 import com.tripbus.booking.service.TicketChangeService;
+import com.tripbus.booking.service.TicketDocumentService;
 import com.tripbus.booking.service.TicketService;
 import com.tripbus.booking.web.dto.ChangeSeatRequest;
 import com.tripbus.booking.web.dto.PassengerRequest;
 import com.tripbus.booking.web.dto.TicketResponse;
 import com.tripbus.booking.web.dto.ValidateTicketRequest;
 import jakarta.validation.Valid;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -30,10 +33,13 @@ public class TicketController {
 
     private final TicketService ticketService;
     private final TicketChangeService ticketChangeService;
+    private final TicketDocumentService ticketDocuments;
 
-    public TicketController(TicketService ticketService, TicketChangeService ticketChangeService) {
+    public TicketController(TicketService ticketService, TicketChangeService ticketChangeService,
+                            TicketDocumentService ticketDocuments) {
         this.ticketService = ticketService;
         this.ticketChangeService = ticketChangeService;
+        this.ticketDocuments = ticketDocuments;
     }
 
     /** US-033: tiquete electrónico con QR (qrImage = data URI PNG). */
@@ -47,6 +53,22 @@ public class TicketController {
         return ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_PNG)
                 .body(ticketService.qrImage(id, CurrentUser.id(authentication), isStaff(authentication)));
+    }
+
+    /** US-145: reenvía el tiquete al correo de la reserva (202). Máximo 3 por día; si no, 429 RESEND_LIMIT_REACHED. */
+    @PostMapping("/{id}/resend")
+    public ResponseEntity<Map<String, Object>> resend(@PathVariable UUID id, Authentication authentication) {
+        return ResponseEntity.accepted().body(ticketDocuments.resend(id, BookingViewer.of(authentication)));
+    }
+
+    /** US-145: tiquete en PDF con el QR. Solo el dueño, el OPERADOR de la empresa del viaje y el ADMIN. */
+    @GetMapping(value = "/{id}/pdf", produces = MediaType.APPLICATION_PDF_VALUE)
+    public ResponseEntity<byte[]> pdf(@PathVariable UUID id, Authentication authentication) {
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_PDF)
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        ContentDisposition.attachment().filename("tiquete-" + id + ".pdf").build().toString())
+                .body(ticketDocuments.pdf(id, BookingViewer.of(authentication)));
     }
 
     /** Validación del QR al abordar (conductor u operador): el QR solo se puede usar una vez. */

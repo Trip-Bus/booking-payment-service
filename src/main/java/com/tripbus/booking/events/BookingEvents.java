@@ -11,6 +11,8 @@ public final class BookingEvents {
     public static final String TICKET_RESCHEDULED = "TicketRescheduled";
     /** US-139 / US-152: cambio de asiento o corrección de datos del pasajero (campo "cambio"). */
     public static final String TICKET_UPDATED = "TicketUpdated";
+    /** US-153: el pasajero no abordó (userId, bookingId, ticketId, itineraryId). Sin reembolso. */
+    public static final String TICKET_NO_SHOW = "TicketNoShow";
 
     /** US-154: la empresa canceló o cambió el viaje de una reserva confirmada (con las opciones del pasajero). */
     public static final String BOOKING_AFFECTED = "BookingAffected";

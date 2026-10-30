@@ -86,6 +86,21 @@ public class Payment {
         this(bookingId, monto, idempotencyKey, "TARJETA", ultimos4, marca, null, now);
     }
 
+    /** US-144: método de la venta en taquilla. No pasa por la pasarela: se aprueba al recibir el efectivo. */
+    public static final String EFECTIVO = "EFECTIVO";
+
+    /** US-144: pago en efectivo recibido en taquilla, aprobado al instante. */
+    public static Payment efectivo(UUID bookingId, BigDecimal monto, String idempotencyKey, Instant now) {
+        Payment p = new Payment(bookingId, monto, idempotencyKey, EFECTIVO, null, null, null, now);
+        p.aprobar(now);
+        return p;
+    }
+
+    /** Un pago en efectivo no tiene cobro en la pasarela: su reembolso lo entrega la taquilla. */
+    public boolean enEfectivo() {
+        return EFECTIVO.equals(metodo);
+    }
+
     public void asignarGatewayId(String gatewayId, Instant now) {
         this.paymentGatewayId = gatewayId;
         this.actualizadoEn = now;

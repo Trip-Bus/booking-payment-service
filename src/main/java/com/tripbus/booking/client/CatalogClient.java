@@ -1,9 +1,11 @@
 package com.tripbus.booking.client;
 
+import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.config.BookingProperties;
 import com.tripbus.booking.config.RequestIdPropagationInterceptor;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
@@ -66,6 +68,29 @@ public class CatalogClient {
         } catch (RestClientException e) {
             return null;
         }
+    }
+
+    /**
+     * US-144: el viaje, distinguiendo "no existe" de "catalog no responde": 404 ITINERARY_NOT_FOUND si catalog
+     * responde 404 y 503 CATALOG_UNAVAILABLE si no responde, falla o responde sin cuerpo.
+     */
+    public ItinerarySummary requireItinerary(UUID itineraryId) {
+        ItinerarySummary summary;
+        try {
+            summary = restClient.get().uri("/itineraries/{id}", itineraryId).retrieve().body(ItinerarySummary.class);
+        } catch (HttpClientErrorException.NotFound e) {
+            throw ApiException.notFound("ITINERARY_NOT_FOUND", "El viaje no existe");
+        } catch (RestClientException e) {
+            throw catalogUnavailable();
+        }
+        if (summary == null) {
+            throw catalogUnavailable();
+        }
+        return summary;
+    }
+
+    private static ApiException catalogUnavailable() {
+        return ApiException.unavailable("CATALOG_UNAVAILABLE", "No se pudo consultar el viaje; intenta de nuevo");
     }
 
     /**
