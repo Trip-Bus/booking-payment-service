@@ -87,8 +87,8 @@ public class BookingController {
                                       @Valid @RequestBody PayRequest request,
                                       Authentication authentication) {
         UUID userId = CurrentUser.id(authentication);
-        String requestHash = IdempotencyService.hash(id.toString(), request.cardToken(), request.cardLast4(),
-                request.cardBrand());
+        String requestHash = IdempotencyService.hash(id.toString(), request.method(), request.cardToken(), request.cardLast4(),
+                request.cardBrand(), String.valueOf(request.pse()), String.valueOf(request.nequi()));
         return idempotencyService.execute(userId, idempotencyKey, requestHash, () ->
                 ResponseEntity.status(HttpStatus.ACCEPTED).body(paymentService.pay(id, userId, request, idempotencyKey)));
     }

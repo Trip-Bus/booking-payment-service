@@ -14,6 +14,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface PaymentRepository extends JpaRepository<Payment, UUID> {
+    java.util.Optional<Payment> findByPaymentGatewayId(String paymentGatewayId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from Payment p where p.id = :id")

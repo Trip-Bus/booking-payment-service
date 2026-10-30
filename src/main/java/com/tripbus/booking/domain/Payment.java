@@ -45,6 +45,12 @@ public class Payment {
     @Column(name = "tarjeta_marca")
     private String tarjetaMarca;
 
+    @Column(name = "banco")
+    private String banco;
+
+    @Column(name = "medio_pago_ultimos4")
+    private String medioPagoUltimos4;
+
     @Column(name = "motivo_rechazo")
     private String motivoRechazo;
 
@@ -60,17 +66,24 @@ public class Payment {
     protected Payment() {
     }
 
-    public Payment(UUID bookingId, BigDecimal monto, String idempotencyKey, String ultimos4, String marca, Instant now) {
+    public Payment(UUID bookingId, BigDecimal monto, String idempotencyKey, String metodo, String ultimos4, String marca,
+                   String banco, Instant now) {
         this.id = UUID.randomUUID();
         this.bookingId = bookingId;
         this.monto = monto;
-        this.metodo = "TARJETA";
+        this.metodo = metodo;
         this.estado = PaymentStatus.PENDIENTE;
         this.idempotencyKey = idempotencyKey;
         this.tarjetaUltimos4 = ultimos4;
         this.tarjetaMarca = marca;
+        this.banco = banco;
+        this.medioPagoUltimos4 = ultimos4;
         this.creadoEn = now;
         this.actualizadoEn = now;
+    }
+
+    public Payment(UUID bookingId, BigDecimal monto, String idempotencyKey, String ultimos4, String marca, Instant now) {
+        this(bookingId, monto, idempotencyKey, "TARJETA", ultimos4, marca, null, now);
     }
 
     public void asignarGatewayId(String gatewayId, Instant now) {
@@ -129,6 +142,9 @@ public class Payment {
     public String getTarjetaMarca() {
         return tarjetaMarca;
     }
+
+    public String getBanco() { return banco; }
+    public String getMedioPagoUltimos4() { return medioPagoUltimos4; }
 
     public String getMotivoRechazo() {
         return motivoRechazo;

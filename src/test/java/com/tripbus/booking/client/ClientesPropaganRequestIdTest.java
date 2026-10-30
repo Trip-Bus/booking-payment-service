@@ -176,6 +176,19 @@ class ClientesPropaganRequestIdTest {
     }
 
     @Test
+    void extenderLaRetencionVaASeatInventoryYSiEstaCaidoEsReintentable() {
+        UUID holdId = UUID.randomUUID();
+        assertThat(new SeatInventoryClient(properties, TOKEN).extendHold(holdId, 300)).isNotNull();
+        assertThat(recibidos).containsEntry("/internal/holds/" + holdId + "/extend", "prueba-booking-1")
+                .containsEntry("/internal/holds/" + holdId + "/extend#token", TOKEN);
+
+        SeatInventoryClient caido = new SeatInventoryClient(
+                new BookingProperties("http://localhost:1", null, null, null, "secreto"), TOKEN);
+        assertThatThrownBy(() -> caido.extendHold(holdId, 300))
+                .isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
+    }
+
+    @Test
     void lasPropiedadesDeReprogramacionTienenValoresPorDefecto() {
         assertThat(properties.rescheduleCutoff()).isEqualTo(Duration.ofHours(3));
         assertThat(properties.maxReschedules()).isEqualTo(2);

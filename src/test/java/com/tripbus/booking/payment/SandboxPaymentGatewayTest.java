@@ -101,6 +101,94 @@ class SandboxPaymentGatewayTest {
         gateway.shutdown();
     }
 
+    private SandboxPaymentGateway pasarelaPse(Duration pseTimeout, boolean duplicar) {
+        PaymentProperties props = new PaymentProperties(url, SECRETO, Duration.ofMillis(10), duplicar,
+                Duration.ofMillis(10), pseTimeout, true, null);
+        return new SandboxPaymentGateway(props, new WebhookSigner(props), MAPPER);
+    }
+
+    private static PaymentGateway.ChargeRequest pse() {
+        return new PaymentGateway.ChargeRequest("PSE", null, "1", null);
+    }
+
+    private static PaymentGateway.ChargeRequest nequi(String telefono) {
+        return new PaymentGateway.ChargeRequest("NEQUI", null, null, telefono);
+    }
+
+    @Test
+    void tarjetaConLaInterfazNuevaNoTieneRedireccion() throws Exception {
+        SandboxPaymentGateway gateway = pasarela(url, false);
+
+        PaymentGateway.ChargeResult r = gateway.charge(UUID.randomUUID(), BigDecimal.ONE, "COP",
+                new PaymentGateway.ChargeRequest("TARJETA", "tok_visa_approved", null, null));
+
+        assertThat(r.gatewayPaymentId()).startsWith("sbx_");
+        assertThat(r.redirectUrl()).isNull();
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 1);
+        assertThat(MAPPER.readTree(cuerpos.get(0)).get("status").asText()).isEqualTo("APPROVED");
+        gateway.shutdown();
+    }
+
+    @Test
+    void psePendienteHastaQueElBancoApruebaYSoloUnaVez() throws Exception {
+        SandboxPaymentGateway gateway = pasarelaPse(Duration.ofMinutes(10), false);
+
+        PaymentGateway.ChargeResult r = gateway.charge(UUID.randomUUID(), BigDecimal.TEN, "COP", pse());
+
+        assertThat(r.redirectUrl()).isEqualTo("/sandbox/pse/" + r.gatewayPaymentId());
+        assertThat(cuerpos).isEmpty(); // sin webhook hasta que el pasajero decide en el banco
+        assertThat(gateway.completePse(r.gatewayPaymentId(), true)).isTrue();
+        assertThat(gateway.completePse(r.gatewayPaymentId(), false)).isFalse();
+        assertThat(gateway.completePse("sbx_desconocido", true)).isFalse();
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 1);
+        JsonNode evento = MAPPER.readTree(cuerpos.get(0));
+        assertThat(evento.get("status").asText()).isEqualTo("APPROVED");
+        assertThat(evento.get("reason").isNull()).isTrue();
+        gateway.shutdown();
+    }
+
+    @Test
+    void pseRechazadaEnElBancoReenviaElWebhookSiSeConfigura() throws Exception {
+        SandboxPaymentGateway gateway = pasarelaPse(Duration.ofMinutes(10), true);
+        PaymentGateway.ChargeResult r = gateway.charge(UUID.randomUUID(), BigDecimal.TEN, "COP", pse());
+
+        gateway.completePse(r.gatewayPaymentId(), false);
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 2);
+        assertThat(MAPPER.readTree(cuerpos.get(0)).get("reason").asText()).isEqualTo("PSE_RECHAZADO_O_VENCIDO");
+        assertThat(cuerpos.get(1)).isEqualTo(cuerpos.get(0));
+        gateway.shutdown();
+    }
+
+    @Test
+    void pseSinDecisionVenceComoRechazada() throws Exception {
+        SandboxPaymentGateway gateway = pasarelaPse(Duration.ofMillis(10), false);
+        PaymentGateway.ChargeResult r = gateway.charge(UUID.randomUUID(), BigDecimal.TEN, "COP", pse());
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 1);
+        assertThat(MAPPER.readTree(cuerpos.get(0)).get("status").asText()).isEqualTo("DECLINED");
+        assertThat(gateway.completePse(r.gatewayPaymentId(), true)).isFalse(); // ya venció
+        gateway.shutdown();
+    }
+
+    @Test
+    void nequiApruebaRechazaOFallaSegunElCelularDePrueba() throws Exception {
+        SandboxPaymentGateway gateway = pasarelaPse(Duration.ofMinutes(10), false);
+
+        assertThat(gateway.charge(UUID.randomUUID(), BigDecimal.ONE, "COP", nequi("3991111111")).redirectUrl())
+                .isNull();
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 1);
+        gateway.charge(UUID.randomUUID(), BigDecimal.ONE, "COP", nequi("3992222222"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 2);
+        gateway.charge(UUID.randomUUID(), BigDecimal.ONE, "COP", nequi("3001234567"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> cuerpos.size() == 3);
+
+        assertThat(MAPPER.readTree(cuerpos.get(0)).get("status").asText()).isEqualTo("APPROVED");
+        assertThat(MAPPER.readTree(cuerpos.get(1)).get("reason").asText()).isEqualTo("PAGO_RECHAZADO_POR_NEQUI");
+        assertThat(MAPPER.readTree(cuerpos.get(2)).get("reason").asText()).isEqualTo("ERROR_NEQUI");
+        gateway.shutdown();
+    }
+
     @Test
     void laFirmaVaciaOAlteradaNoSeAcepta() {
         WebhookSigner signer = new WebhookSigner(new PaymentProperties(url, SECRETO, null, false));

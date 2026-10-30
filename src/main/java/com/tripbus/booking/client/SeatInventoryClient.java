@@ -90,6 +90,13 @@ public class SeatInventoryClient {
         }
     }
 
+    public Hold extendHold(UUID holdId, long seconds) {
+        try {
+            return restClient.post().uri("/internal/holds/{id}/extend", holdId).body(Map.of("segundos", seconds))
+                    .retrieve().body(Hold.class);
+        } catch (RestClientException e) { throw RemoteErrors.translate(SERVICE, e); }
+    }
+
     public void releaseHold(UUID holdId, String motivo) {
         try {
             restClient.post().uri("/internal/holds/{id}/release", holdId)
