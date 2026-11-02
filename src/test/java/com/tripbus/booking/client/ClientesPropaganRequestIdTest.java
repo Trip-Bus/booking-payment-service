@@ -65,6 +65,12 @@ class ClientesPropaganRequestIdTest {
             json = "null";
         } else if (path.endsWith(SIN_ASIENTOS)) {
             json = "{\"capacidad\":0}";
+        } else if (path.startsWith("/internal/companies/")) {
+            recibidos.put(path + "#query", query);
+            json = "{\"nombre\":\"Expreso Andino\",\"estado\":\"ACTIVA\",\"comisionPorcentaje\":8.5,\"cuotaMensual\":450000}";
+        } else if (path.equals("/internal/occupancy")) {
+            recibidos.put(path + "#query", query);
+            json = "[{\"itineraryId\":\"" + SIN_ASIENTOS + "\",\"capacidad\":40,\"vendidos\":30,\"porcentajeOcupacion\":75.0}]";
         } else if (path.startsWith("/trips/search")) {
             recibidos.put(path + "#query", query);
             json = "[{\"itineraryId\":\"" + UUID.randomUUID() + "\",\"asientosDisponibles\":4}]";
@@ -198,6 +204,58 @@ class ClientesPropaganRequestIdTest {
         assertThat(propias.rescheduleCutoff()).isEqualTo(Duration.ofHours(6));
         assertThat(propias.maxReschedules()).isEqualTo(1);
         assertThat(propias.rescheduleFee()).isEqualByComparingTo("5000");
+    }
+
+    @Test
+    void condicionesDeLaEmpresaConElTokenInternoSoloEnInternal() {
+        UUID empresa = UUID.randomUUID();
+        CatalogClient conToken = new CatalogClient(properties, TOKEN);
+
+        CatalogClient.CompanyTerms terms = conToken.companyTerms(empresa, java.time.LocalDate.of(2026, 1, 31));
+
+        assertThat(terms.comisionPorcentaje()).isEqualByComparingTo("8.5");
+        assertThat(terms.cuotaMensual()).isEqualByComparingTo("450000");
+        String path = "/internal/companies/" + empresa;
+        assertThat(recibidos).containsEntry(path + "#token", TOKEN).containsEntry(path + "#query", "fecha=2026-01-31")
+                .containsEntry(path, "prueba-booking-1");
+        // Las consultas públicas a catalog no llevan el token interno.
+        conToken.itinerary(UUID.randomUUID());
+        assertThat(recibidos.entrySet()).filteredOn(e -> e.getKey().startsWith("/itineraries/")
+                && e.getKey().endsWith("#token")).allMatch(e -> e.getValue().equals("null"));
+    }
+
+    @Test
+    void sinComisionCuerpoVacioOCatalogCaidoNoHayCondiciones() {
+        CatalogClient catalog = new CatalogClient(properties);
+        java.time.LocalDate dia = java.time.LocalDate.of(2026, 1, 31);
+        // Sin token (constructor de pruebas): no se envía el header.
+        assertThat(catalog.companyTerms(UUID.fromString(SIN_ASIENTOS), dia)).isNull();
+        assertThat(recibidos).containsEntry("/internal/companies/" + SIN_ASIENTOS + "#token", "null");
+        assertThat(catalog.companyTerms(UUID.fromString(VACIO), dia)).isNull();
+        BookingProperties caidos = new BookingProperties("http://localhost:1", "http://localhost:1", null, null, "s");
+        assertThat(new CatalogClient(caidos, TOKEN).companyTerms(UUID.randomUUID(), dia)).isNull();
+    }
+
+    @Test
+    void ocupacionDeVariosViajesEnUnaSolaLlamada() {
+        SeatInventoryClient client = new SeatInventoryClient(properties, TOKEN);
+        UUID a = UUID.fromString(SIN_ASIENTOS);
+        UUID b = UUID.randomUUID();
+
+        List<SeatInventoryClient.Occupancy> ocupacion = client.occupancy(List.of(a, b));
+
+        assertThat(ocupacion).singleElement().satisfies(o -> {
+            assertThat(o.itineraryId()).isEqualTo(a);
+            assertThat(o.porcentajeOcupacion()).isEqualTo(75.0);
+        });
+        assertThat(recibidos).containsEntry("/internal/occupancy#token", TOKEN)
+                .containsEntry("/internal/occupancy#query", "itineraryIds=" + a + "," + b);
+        // Lista vacía: no llama; cuerpo null: lista vacía; caído: reintentable.
+        assertThat(client.occupancy(List.of())).isEmpty();
+        assertThat(client.occupancy(List.of(UUID.fromString(VACIO)))).isEmpty();
+        SeatInventoryClient caido = new SeatInventoryClient(
+                new BookingProperties("http://localhost:1", null, null, null, "s"), TOKEN);
+        assertThatThrownBy(() -> caido.occupancy(List.of(b))).isInstanceOf(RemoteErrors.RemoteUnavailableException.class);
     }
 
     @Test

@@ -7,13 +7,17 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.DynamicUpdate;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.UUID;
 
 /** Pago con tarjeta. Nunca se guarda el número completo: solo token de la pasarela y últimos 4. */
 @Entity
+// Solo se escriben las columnas que cambian: CommissionService completa la comisión con un UPDATE propio.
+@DynamicUpdate
 @Table(name = "payments")
 public class Payment {
 
@@ -59,6 +63,18 @@ public class Payment {
 
     @Column(name = "actualizado_en", nullable = false)
     private Instant actualizadoEn;
+
+    /** US-190: cuándo quedó aprobado (fecha de la venta en los reportes); null si nunca se aprobó. */
+    @Column(name = "aprobado_en")
+    private Instant aprobadoEn;
+
+    /** US-190: comisión de TripBus vigente en la fecha de la venta (0 a 30 %); null mientras catalog no responda. */
+    @Column(name = "comision_porcentaje")
+    private BigDecimal comisionPorcentaje;
+
+    /** US-190: monto × porcentaje / 100, redondeado al peso. */
+    @Column(name = "comision_valor")
+    private BigDecimal comisionValor;
 
     @Version
     private long version;
@@ -108,7 +124,27 @@ public class Payment {
 
     public void aprobar(Instant now) {
         this.estado = PaymentStatus.APROBADO;
+        if (this.aprobadoEn == null) {
+            this.aprobadoEn = now;
+        }
         this.actualizadoEn = now;
+    }
+
+    /** US-190: valor de la comisión para un porcentaje (0 a 30): monto × porcentaje / 100, redondeado al peso. */
+    public static BigDecimal comision(BigDecimal monto, BigDecimal porcentaje) {
+        return monto.multiply(porcentaje).divide(BigDecimal.valueOf(100), 0, RoundingMode.HALF_UP);
+    }
+
+    public Instant getAprobadoEn() {
+        return aprobadoEn;
+    }
+
+    public BigDecimal getComisionPorcentaje() {
+        return comisionPorcentaje;
+    }
+
+    public BigDecimal getComisionValor() {
+        return comisionValor;
     }
 
     public void rechazar(String motivo, Instant now) {

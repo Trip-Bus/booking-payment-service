@@ -9,6 +9,7 @@ import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.payment.PaymentGateway;
 import com.tripbus.booking.payment.WebhookSigner;
 import com.tripbus.booking.repository.TicketRepository;
+import com.tripbus.booking.service.CommissionService;
 import com.tripbus.booking.service.PaymentService;
 import com.tripbus.booking.repository.WebhookLogRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,7 +33,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -41,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -311,6 +315,48 @@ class BookingSagaIT {
         assertThat(webhook(paymentId, "APPROVED", "95000", "USD")).isEqualTo("MONTO_INCORRECTO");
         mvc.perform(get("/bookings/{id}", bookingId).with(pasajero()))
                 .andExpect(jsonPath("$.estado").value("PAGO_RECHAZADO"));
+    }
+
+    @Test
+    void laVentaAprobadaPorWebhookRegistraLaComisionVigenteDespuesDelCommit() throws Exception {
+        when(catalog.companyTerms(eq(companyId), any())).thenReturn(new CatalogClient.CompanyTerms(companyId,
+                "Expreso Andino", "ACTIVA", new BigDecimal("8.00"), new BigDecimal("500000")));
+        UUID bookingId = UUID.fromString(crearReserva(nuevaRetencion()).get("bookingId").asText());
+        String paymentId = objectMapper.readTree(pagar(bookingId, "pago-con-comision", "tok_visa_approved"))
+                .get("paymentId").asText();
+        when(seatInventory.confirmSale(any(), any())).thenReturn(null);
+
+        assertThat(webhook(paymentId, "APPROVED")).isEqualTo("APROBADO");
+
+        // US-190: se registra en segundo plano: 95.000 × 8 % = 7.600, con la fecha de la venta en Colombia.
+        await().atMost(Duration.ofSeconds(10)).until(() -> jdbc.queryForObject(
+                "select comision_valor from payments where id = ?", BigDecimal.class, UUID.fromString(paymentId)) != null);
+        assertThat(jdbc.queryForMap("select comision_porcentaje, comision_valor, aprobado_en from payments where id = ?",
+                UUID.fromString(paymentId)))
+                .containsEntry("comision_porcentaje", new BigDecimal("8.00"))
+                .containsEntry("comision_valor", new BigDecimal("7600.00"))
+                .extractingByKey("aprobado_en").isNotNull();
+        verify(catalog).companyTerms(companyId, LocalDate.now(CommissionService.ZONA));
+    }
+
+    @Test
+    void elAprobadoTardioCuentaComoVentaYSuReembolsoRevierteLaComision() throws Exception {
+        when(catalog.companyTerms(eq(companyId), any())).thenReturn(new CatalogClient.CompanyTerms(companyId,
+                "Expreso Andino", "ACTIVA", new BigDecimal("10"), null));
+        UUID bookingId = UUID.fromString(crearReserva(nuevaRetencion()).get("bookingId").asText());
+        UUID paymentId = UUID.fromString(objectMapper.readTree(pagar(bookingId, "pago-tardio-comision",
+                "tok_visa_approved")).get("paymentId").asText());
+        paymentService.failPayment(paymentId, "SIN_RESPUESTA_DE_LA_PASARELA");
+
+        assertThat(webhook(paymentId.toString(), "APPROVED")).isEqualTo("APROBADO_TARDIO_REEMBOLSADO");
+
+        // La comisión (9.500) llega después del reembolso: el reembolso la registra en negativo.
+        await().atMost(Duration.ofSeconds(10)).until(() -> jdbc.queryForObject(
+                "select comision_valor from refunds where payment_id = ?", BigDecimal.class, paymentId) != null);
+        assertThat(jdbc.queryForObject("select comision_valor from refunds where payment_id = ?", BigDecimal.class,
+                paymentId)).isEqualByComparingTo("-9500");
+        assertThat(jdbc.queryForObject("select comision_valor from payments where id = ?", BigDecimal.class,
+                paymentId)).isEqualByComparingTo("9500");
     }
 
     @Test

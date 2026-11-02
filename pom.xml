@@ -38,11 +38,11 @@
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-26 (Sprint 3: viajes afectados, reubicación y manifiesto)
+             Fijados con la medición del 2026-11-02 (Sprint 4: reportes de ventas y comisión, US-190)
              redondeada hacia abajo al 5 %:
-             líneas 90,2 % -> 0.90; ramas 82,5 % -> 0.80. -->
-        <jacoco.minimo.lineas>0.90</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.80</jacoco.minimo.ramas>
+             líneas 96,2 % -> 0.95; ramas 90,6 % -> 0.90. -->
+        <jacoco.minimo.lineas>0.95</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.90</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
@@ -75,7 +75,6 @@
             **/domain/Passenger.java,
             **/domain/PassengerChange.java,
             **/domain/ManifestAccessLog.java,
-            **/domain/Refund.java,
             **/domain/SagaLogEntry.java,
             **/domain/Ticket.java,
             **/domain/WebhookLog.java,
@@ -296,7 +295,6 @@
                         <exclude>**/domain/Passenger.class</exclude>
                         <exclude>**/domain/PassengerChange.class</exclude>
                         <exclude>**/domain/ManifestAccessLog.class</exclude>
-                        <exclude>**/domain/Refund.class</exclude>
                         <exclude>**/domain/SagaLogEntry.class</exclude>
                         <exclude>**/domain/Ticket.class</exclude>
                         <exclude>**/domain/WebhookLog.class</exclude>

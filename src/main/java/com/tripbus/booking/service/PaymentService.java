@@ -67,6 +67,7 @@ public class PaymentService {
     private final TransactionTemplate tx;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CommissionService commissions;
 
     @SuppressWarnings("java:S107") // dependencias de la saga de compra, inyectadas por Spring
     public PaymentService(BookingRepository bookingRepository, PaymentRepository paymentRepository,
@@ -74,7 +75,8 @@ public class PaymentService {
                           SeatInventoryClient seatInventory, PaymentGateway gateway, WebhookSigner signer,
                           TicketService ticketService, TicketMailService ticketMail, RescheduleSaga rescheduleSaga,
                           SagaLogger saga, EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper,
-                          Clock clock) {
+                          Clock clock, CommissionService commissions) {
+        this.commissions = commissions;
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
@@ -287,6 +289,7 @@ public class PaymentService {
                     payload.put("timestamp", now);
                     saga.log(booking.getId(), "PAGO_APROBADO", "OK", payload);
                     events.publishAfterCommit(BookingEvents.PAYMENT_APPROVED, payload);
+                    commissions.registrarDespuesDelCommit(payment.getId());
                     outcome = WebhookOutcome.APROBADO;
                 } else {
                     String motivo = reason != null ? reason : "RECHAZADO_POR_PASARELA";
@@ -338,8 +341,11 @@ public class PaymentService {
         log.warn("Pago {} aprobado por la pasarela después de darlo por fallido ({}): se reembolsa {}",
                 payment.getId(), payment.getMotivoRechazo(), monto);
         gateway.refund(payment.getPaymentGatewayId(), monto);
-        Refund refund = refundRepository.save(new Refund(payment.getId(), monto, "APROBADO_TARDIO", now));
+        // US-190: la pasarela sí cobró, así que cuenta como venta (aprobado_en) y su reembolso revierte la comisión.
+        payment.aprobar(now);
+        Refund refund = refundRepository.save(Refund.de(payment, monto, "APROBADO_TARDIO", now));
         payment.reembolsar(now);
+        commissions.registrarDespuesDelCommit(payment.getId());
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("bookingId", payment.getBookingId());
         payload.put("paymentId", payment.getId());
@@ -470,7 +476,7 @@ public class PaymentService {
                 if (!payment.enEfectivo()) {
                     gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
                 }
-                Refund refund = refundRepository.save(new Refund(payment.getId(), payment.getMonto(), motivo, now));
+                Refund refund = refundRepository.save(Refund.de(payment, payment.getMonto(), motivo, now));
                 payment.reembolsar(now);
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("bookingId", bookingId);

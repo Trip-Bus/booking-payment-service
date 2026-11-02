@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Llamadas internas a Seat Inventory: GetHold, ConfirmSale, ReleaseHold, VoidSale y SwapSeat. */
 @Component
@@ -42,6 +43,32 @@ public class SeatInventoryClient {
     }
 
     public record SeatStates(UUID itineraryId, int capacidad, List<SeatView> asientos) {
+    }
+
+    /** US-190: ocupación de un viaje en GET /internal/occupancy (porcentajeOcupacion en %, con dos decimales). */
+    public record Occupancy(UUID itineraryId, int capacidad, long vendidos, double porcentajeOcupacion) {
+    }
+
+    /** Máximo de viajes por llamada a /internal/occupancy (más responde 400 TOO_MANY_ITINERARIES). */
+    public static final int MAX_OCCUPANCY_IDS = 200;
+
+    /**
+     * US-190: ocupación de hasta {@link #MAX_OCCUPANCY_IDS} viajes; los desconocidos se omiten. Si seat-inventory
+     * no responde lanza {@link RemoteErrors.RemoteUnavailableException}.
+     */
+    public List<Occupancy> occupancy(List<UUID> itineraryIds) {
+        if (itineraryIds.isEmpty()) {
+            return List.of();
+        }
+        try {
+            Occupancy[] result = restClient.get()
+                    .uri(u -> u.path("/internal/occupancy").queryParam("itineraryIds", itineraryIds.stream()
+                            .map(UUID::toString).collect(Collectors.joining(","))).build())
+                    .retrieve().body(Occupancy[].class);
+            return result == null ? List.of() : List.of(result);
+        } catch (RestClientException e) {
+            throw RemoteErrors.translate(SERVICE, e);
+        }
     }
 
     /**
