@@ -70,7 +70,7 @@ class PagoPorMetodoTest {
                 mock(WebhookLogRepository.class), seatInventory, gateway, mock(WebhookSigner.class),
                 mock(TicketService.class), mock(TicketMailService.class), mock(RescheduleSaga.class),
                 mock(SagaLogger.class), mock(EventPublisher.class), tx, new ObjectMapper(),
-                Clock.fixed(AHORA, ZoneOffset.UTC));
+                Clock.fixed(AHORA, ZoneOffset.UTC), mock(CommissionService.class));
         booking = new Booking(holdId, userId, UUID.randomUUID(), null, List.of("12"), new BigDecimal("95000"), "COP",
                 AHORA.plusSeconds(600), AHORA);
         when(bookings.findById(booking.getId())).thenReturn(Optional.of(booking));

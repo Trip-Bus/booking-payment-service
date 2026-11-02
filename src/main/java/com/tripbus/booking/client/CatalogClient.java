@@ -3,6 +3,8 @@ package com.tripbus.booking.client;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.config.BookingProperties;
 import com.tripbus.booking.config.RequestIdPropagationInterceptor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -20,8 +22,16 @@ import java.util.UUID;
 public class CatalogClient {
 
     private final RestClient restClient;
+    /** Token entre servicios: solo se envía a /internal/** (las demás consultas a catalog son públicas). */
+    private final String internalToken;
 
     public CatalogClient(BookingProperties properties) {
+        this(properties, null);
+    }
+
+    @Autowired
+    public CatalogClient(BookingProperties properties, @Value("${tripbus.internal-token}") String internalToken) {
+        this.internalToken = internalToken;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(1000);
         factory.setReadTimeout(3000);
@@ -51,6 +61,34 @@ public class CatalogClient {
         public ItinerarySummary(UUID itineraryId, String origen, String destino, Instant fechaSalida,
                                 Instant fechaLlegadaEstimada, String empresa, String placa) {
             this(itineraryId, origen, destino, fechaSalida, fechaLlegadaEstimada, empresa, placa, null);
+        }
+    }
+
+    /**
+     * US-190: condiciones comerciales de la empresa vigentes en {@code fecha} (hora de Colombia): comisión de TripBus
+     * por tiquete (0 a 30 %) y cuota mensual.
+     */
+    public record CompanyTerms(UUID id, String nombre, String estado, BigDecimal comisionPorcentaje,
+                               BigDecimal cuotaMensual) {
+    }
+
+    /**
+     * US-190: GET /internal/companies/{id}?fecha=. Devuelve null si catalog no responde, falla o no trae la comisión:
+     * quien llama no frena la venta (la comisión la completa CommissionJob).
+     */
+    public CompanyTerms companyTerms(UUID companyId, LocalDate fecha) {
+        try {
+            CompanyTerms terms = restClient.get()
+                    .uri(u -> u.path("/internal/companies/{id}").queryParam("fecha", fecha).build(companyId))
+                    .headers(h -> {
+                        if (internalToken != null) {
+                            h.set("X-Internal-Token", internalToken);
+                        }
+                    })
+                    .retrieve().body(CompanyTerms.class);
+            return terms != null && terms.comisionPorcentaje() != null ? terms : null;
+        } catch (RestClientException e) {
+            return null;
         }
     }
 

@@ -50,7 +50,8 @@ class ConfirmarReprogramacionTest {
         PaymentService service = new PaymentService(bookings, payments, mock(RefundRepository.class),
                 mock(WebhookLogRepository.class), seatInventory, mock(PaymentGateway.class), mock(WebhookSigner.class),
                 ticketService, mock(TicketMailService.class), rescheduleSaga, mock(SagaLogger.class),
-                mock(EventPublisher.class), tx, new ObjectMapper(), Clock.fixed(AHORA, ZoneOffset.UTC));
+                mock(EventPublisher.class), tx, new ObjectMapper(), Clock.fixed(AHORA, ZoneOffset.UTC),
+                mock(CommissionService.class));
 
         Booking origen = new Booking(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), null, List.of("12"),
                 new BigDecimal("95000"), "COP", AHORA, AHORA);

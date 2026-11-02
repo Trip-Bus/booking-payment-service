@@ -30,6 +30,8 @@ US-153, US-166 (lado de booking) · **Puerto:** 18004 · **BD:** `tripbus_bookin
 | GET | `/bookings/affected` · `/bookings/{id}/affected` | **US-154**: mis reservas afectadas pendientes y el detalle (causa, opciones, plazo, decisión). |
 | POST | `/bookings/{id}/affected/reschedule` `{holdId}` · `/affected/refund` · `/affected/accept` | **US-154** (dueño): reprogramar gratis, reembolso o aceptar el nuevo horario. |
 | GET | `/itineraries/{id}/manifest` `?format=csv` | **US-172**: manifiesto de pasajeros (ADMIN, OPERADOR/CONDUCTOR de la empresa). |
+| GET | `/reports/sales?desde=&hasta=&agrupar=dia\|ruta\|metodo\|canal&companyId=` · `/reports/sales.csv` | **US-190**: ventas, ingresos y comisión de TripBus (OPERADOR: su empresa; ADMIN: todas o `companyId`). |
+| GET | `/reports/platform?mes=YYYY-MM` · `/reports/platform.csv` | **US-190** (ADMIN): facturación de TripBus del mes por empresa (cuota mensual + comisión). |
 | POST | `/webhooks/payment` | Webhook de la pasarela (firma `X-Signature` HMAC-SHA256, **sin JWT**). |
 
 `pasajeros[].passengerId` (en la reserva y en el tiquete) es el que usa el PATCH. `BookingResponse.origenBookingId`
@@ -250,6 +252,52 @@ Al reprogramar (US-150 y no-show), si la reserva tiene `offer_id` se consulta fl
 → `503 OFFERS_UNAVAILABLE`. Las reservas **afectadas por la empresa** (US-154) siempre se pueden reprogramar gratis o
 reembolsar, aunque sean de oferta: el pasajero no tiene la culpa.
 
+### Comisión de TripBus (US-190)
+
+Modelo de negocio: cada empresa paga una **cuota mensual** y una **comisión por tiquete**; ambas condiciones viven en
+catalog con su vigencia (`GET /internal/companies/{companyId}?fecha=YYYY-MM-DD`, con `X-Internal-Token`).
+
+- **Venta** = pago que queda `APROBADO` (app con cualquier método, taquilla en efectivo o la diferencia de una
+  reprogramación). Se guarda `payments.aprobado_en` (fecha de la venta).
+- **Comisión de la venta**: después del commit y en segundo plano se consulta a catalog la comisión **vigente en la
+  fecha de la venta** (hora de Colombia) y se guardan `comision_porcentaje` (0 a 30) y `comision_valor` = monto ×
+  porcentaje / 100, **redondeado al peso más cercano**. Un cambio posterior de las condiciones no toca las ventas ya
+  registradas.
+- **Catalog caído**: la venta **no se frena**; la comisión queda en null y `CommissionJob` la completa cada 15 min.
+  El mismo job corre **al arrancar** (idempotente) y completa las ventas anteriores a este cambio con la vigencia de su
+  fecha (`tripbus.booking.commission-backfill-enabled`, por defecto `true`).
+- **Reversión**: al reembolsar una venta (aprobado tardío, asiento perdido, viaje afectado...) el reembolso registra la
+  comisión en negativo (`refunds.comision_valor`); si la comisión llega después del reembolso, el job también la
+  revierte. En los reportes la comisión de una venta reembolsada es **0**. Un aprobado tardío (la pasarela aprueba un
+  pago que ya se dio por fallido) cuenta como venta y su reembolso la revierte.
+
+### Reportes de ventas e ingresos (US-190)
+
+`GET /reports/sales?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&agrupar=dia|ruta|metodo|canal` (fechas de Colombia, ambas
+incluidas, máximo 366 días; `agrupar` por defecto `dia`). OPERADOR: solo su empresa (pedir otra con `companyId` →
+`403 FORBIDDEN_COMPANY`); ADMIN: todas o la de `?companyId=`. Por grupo y en `totales`, en COP enteros:
+
+| Campo | Qué es |
+|---|---|
+| `tiquetesVendidos` | Asientos de las ventas no reembolsadas (la diferencia de una reprogramación no es un tiquete nuevo). |
+| `ingresosBrutos` | Suma de las ventas del rango. |
+| `reembolsos` | Lo reembolsado de esas ventas (se cuenta en la fecha de la venta). |
+| `ingresosNetos` | Brutos − reembolsos. |
+| `comisionTripBus` | Comisión de las ventas no reembolsadas. |
+| `netoEmpresa` | Netos − comisión. |
+| `ocupacionPromedio` | Solo con `agrupar=ruta`: promedio de `porcentajeOcupacion` de esos viajes (seat-inventory `GET /internal/occupancy`, en bloques de 200). `null` si seat-inventory no responde; el reporte carga igual. |
+
+`ventasSinComision` cuenta las ventas cuya comisión aún no se registró. `GET /reports/sales.csv` devuelve lo mismo en
+CSV (con la fila `TOTAL` al final).
+
+`GET /reports/platform?mes=YYYY-MM` (solo ADMIN): por empresa, la **cuota mensual vigente el primer día del mes**
+(catalog), la comisión de las ventas del mes, el **total a cobrar** (cuota + comisión) y los tiquetes; al final el
+total de la plataforma. Aparecen todas las empresas con reservas aunque no hayan vendido ese mes (pagan la cuota). Si
+catalog no da la cuota de una empresa, `cuotaMensual` y `totalACobrar` quedan `null` e `incompleto = true`. También
+en CSV con `/reports/platform.csv`.
+
+Todo se calcula con consultas agregadas en SQL (índices por fecha de aprobación y estado, por empresa y por reserva).
+
 ## Flujo de ramas y entornos
 
 ```
@@ -424,6 +472,12 @@ mvn -B verify      # unitarias + integración con PostgreSQL y Redis reales (Tes
   job; reprogramar un no-show dentro y fuera de plazo; oferta no reprogramable (y sin flash-offers) y afectada de
   oferta que sí se puede; relleno de los datos del viaje. Las reglas una a una están en `BoxOfficeServiceTest`,
   `MyTripsServiceTest`, `TicketDocumentServiceTest`, `NoShowJobTest`, `RescheduleServiceTest` y `ClientesSprint4Test`.
+- `ReportesYComisionIT` (US-190, catalog y seat-inventory simulados): comisión con la vigencia de la fecha de la venta
+  en Colombia y redondeo al peso; un cambio de vigencia no altera ventas pasadas; catalog caído y el job que completa;
+  reembolso que revierte (antes y después de registrar la comisión); cada agrupación con sus totales, ocupación por
+  ruta (también caída y en bloques de 200); CSV; otra empresa; facturación de la plataforma solo para ADMIN. La
+  comisión por webhook y la del aprobado tardío están en `BookingSagaIT`; las reglas una a una en `ComisionUnitTest`
+  y `ReportControllerTest`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -441,10 +495,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-26) | Mínimo |
+| Métrica | Medido (2026-11-02) | Mínimo |
 |---|---|---|
-| Líneas | 90,2 % | `jacoco.minimo.lineas` = 0.90 |
-| Ramas | 82,5 % | `jacoco.minimo.ramas` = 0.80 |
+| Líneas | 96,2 % | `jacoco.minimo.lineas` = 0.95 |
+| Ramas | 90,6 % | `jacoco.minimo.ramas` = 0.90 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
@@ -454,8 +508,8 @@ actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para sub
 Fuera de la cobertura (mismas en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está lo que no tiene lógica: `BookingApplication`, los records de `web/dto` (ninguno tiene métodos),
 los records `repository/ManifestRow`, las entidades JPA de solo constructor/getters (`Passenger`, `PassengerChange`,
-`ManifestAccessLog`, `Refund`, `SagaLogEntry`, `Ticket`,
-`WebhookLog`, `ProcessedEvent`) y `config/OpenApiConfig`. `Booking`, `Payment`, `IdempotencyKey`,
+`ManifestAccessLog`, `SagaLogEntry`, `Ticket`,
+`WebhookLog`, `ProcessedEvent`) y `config/OpenApiConfig`. `Booking`, `Payment`, `Refund` (revierte la comisión), `IdempotencyKey`,
 `BookingProperties` y `PaymentProperties` tienen lógica y **sí** cuentan.
 
 ### Vulnerabilidades aceptadas (`.trivyignore.yaml`)

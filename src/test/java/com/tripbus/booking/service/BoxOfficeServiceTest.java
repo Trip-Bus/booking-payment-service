@@ -52,6 +52,7 @@ class BoxOfficeServiceTest {
     private final SeatInventoryClient seatInventory = mock(SeatInventoryClient.class);
     private final IdentityClient identity = mock(IdentityClient.class);
     private final PaymentService paymentService = mock(PaymentService.class);
+    private final CommissionService commissions = mock(CommissionService.class);
     private final TransactionTemplate tx = mock(TransactionTemplate.class);
     private final UUID empresa = UUID.randomUUID();
     private final UUID itinerario = UUID.randomUUID();
@@ -62,7 +63,7 @@ class BoxOfficeServiceTest {
     void preparar() {
         service = new BoxOfficeService(bookings, mock(PassengerRepository.class), payments, tickets, catalog,
                 seatInventory, identity, paymentService, mock(SagaLogger.class), mock(EventPublisher.class), tx,
-                Clock.fixed(AHORA, ZoneOffset.UTC));
+                Clock.fixed(AHORA, ZoneOffset.UTC), commissions);
         when(catalog.requireItinerary(itinerario)).thenReturn(new CatalogClient.ItinerarySummary(itinerario, "A", "B",
                 AHORA.plus(Duration.ofHours(2)), null, "E", "P", empresa, "PROGRAMADO"));
         when(catalog.price(itinerario)).thenReturn(new CatalogClient.Price(itinerario, BigDecimal.TEN, "COP", "PROGRAMADO"));

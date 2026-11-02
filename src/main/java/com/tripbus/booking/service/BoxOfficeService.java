@@ -68,13 +68,15 @@ public class BoxOfficeService {
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final CommissionService commissions;
 
     @SuppressWarnings("java:S107") // dependencias de la venta en taquilla, inyectadas por Spring
     public BoxOfficeService(BookingRepository bookingRepository, PassengerRepository passengerRepository,
                             PaymentRepository paymentRepository, TicketRepository ticketRepository,
                             CatalogClient catalog, SeatInventoryClient seatInventory, IdentityClient identity,
                             PaymentService paymentService, SagaLogger saga, EventPublisher events,
-                            TransactionTemplate tx, Clock clock) {
+                            TransactionTemplate tx, Clock clock, CommissionService commissions) {
+        this.commissions = commissions;
         this.bookingRepository = bookingRepository;
         this.passengerRepository = passengerRepository;
         this.paymentRepository = paymentRepository;
@@ -186,6 +188,7 @@ public class BoxOfficeService {
         aprobado.put("timestamp", now);
         saga.log(booking.getId(), "PAGO_EFECTIVO_APROBADO", "OK", aprobado);
         events.publishAfterCommit(BookingEvents.PAYMENT_APPROVED, aprobado);
+        commissions.registrarDespuesDelCommit(pago.getId());
         return booking.getId();
     }
 

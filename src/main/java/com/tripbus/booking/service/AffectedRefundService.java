@@ -142,7 +142,7 @@ public class AffectedRefundService {
         if (!payment.enEfectivo()) {
             gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
         }
-        Refund refund = refundRepository.save(new Refund(payment.getId(), payment.getMonto(), "AFECTADA_POR_LA_EMPRESA",
+        Refund refund = refundRepository.save(Refund.de(payment, payment.getMonto(), "AFECTADA_POR_LA_EMPRESA",
                 now));
         payment.reembolsar(now);
         Map<String, Object> payload = new LinkedHashMap<>();
