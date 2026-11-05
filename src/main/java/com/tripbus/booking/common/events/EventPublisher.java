@@ -32,16 +32,19 @@ public class EventPublisher {
     private final EventProperties properties;
     private final String source;
     private final AtomicLong published = new AtomicLong();
+    private final EventTrace trace;
 
     public EventPublisher(
             StringRedisTemplate redis,
             ObjectMapper objectMapper,
             EventProperties properties,
-            @Value("${spring.application.name}") String source) {
+            @Value("${spring.application.name}") String source,
+            EventTrace trace) {
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.source = source;
+        this.trace = trace;
     }
 
     /** Publica de inmediato. Lanza excepción si Redis no está disponible. */
@@ -59,6 +62,7 @@ public class EventPublisher {
         fields.put("source", source);
         fields.put("occurredAt", Instant.now().toString());
         fields.put("payload", toJson(payload));
+        trace.inyectar(fields);
 
         MapRecord<String, String, String> record = StreamRecords.newRecord().in(properties.stream()).ofMap(fields);
         redis.opsForStream().add(record);

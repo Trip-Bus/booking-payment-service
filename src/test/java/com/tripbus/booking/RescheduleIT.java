@@ -132,6 +132,7 @@ class RescheduleIT {
     @BeforeEach
     void simularServicios() {
         reset(seatInventory, catalog, gateway);
+        com.tripbus.booking.support.PreciosDePrueba.desdePrecioBase(catalog);
         userId = UUID.randomUUID();
         viajeOriginal = viaje("Bogotá", "Medellín", companyId, Duration.ofDays(2), "95000");
         when(gateway.charge(any(), any(), anyString(), anyString()))

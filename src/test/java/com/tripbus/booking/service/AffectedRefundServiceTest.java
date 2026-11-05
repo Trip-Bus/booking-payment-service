@@ -67,7 +67,7 @@ class AffectedRefundServiceTest {
     @SuppressWarnings("unchecked")
     void preparar() {
         service = new AffectedRefundService(affected, bookings, tickets, payments, refunds, gateway, seatInventory, saga,
-                mock(EventPublisher.class), tx, Clock.fixed(AHORA, ZoneOffset.UTC));
+                mock(EventPublisher.class), tx, Clock.fixed(AHORA, ZoneOffset.UTC), new com.tripbus.booking.observabilidad.MetricasBooking(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
         when(tx.execute(any())).thenAnswer(inv -> inv.<TransactionCallback<?>>getArgument(0).doInTransaction(null));
         doAnswer(inv -> {
             inv.<Consumer<Object>>getArgument(0).accept(null);

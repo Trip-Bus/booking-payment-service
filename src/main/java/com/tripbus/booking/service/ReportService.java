@@ -30,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -61,7 +62,8 @@ public class ReportService {
             COALESCE(ROUND(SUM(p.monto)), 0) AS brutos,
             COALESCE(ROUND(SUM(COALESCE(r.monto, 0))), 0) AS reembolsos,
             COALESCE(ROUND(SUM(CASE WHEN r.id IS NULL THEN COALESCE(p.comision_valor, 0) ELSE 0 END)), 0) AS comision,
-            COUNT(*) FILTER (WHERE r.id IS NULL AND p.comision_porcentaje IS NULL) AS sin_comision""";
+            COUNT(*) FILTER (WHERE r.id IS NULL AND p.comision_porcentaje IS NULL) AS sin_comision,
+            COALESCE(ROUND(SUM(b.descuento_cupon)), 0) AS descuentos""";
 
     private static final String GRUPO_DIA = "to_char(p.aprobado_en AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD')";
     private static final String GRUPO_RUTA = "COALESCE(b.origen || ' - ' || b.destino, 'SIN_RUTA')";
@@ -158,7 +160,7 @@ public class ReportService {
             String grupo = (String) g[0];
             filas.add(fila(grupo, (long[]) g[1], ocupacion.get(grupo)));
         }
-        long[] t = totales != null ? totales : new long[5];
+        long[] t = Objects.requireNonNullElseGet(totales, () -> new long[6]);
         return new SalesReportResponse(desde, hasta, agrupar.name().toLowerCase(Locale.ROOT), companyId, filas,
                 fila("TOTAL", t, null), t[4]);
     }
@@ -172,12 +174,12 @@ public class ReportService {
 
     private static long[] metricas(ResultSet rs) throws SQLException {
         return new long[]{rs.getLong("tiquetes"), rs.getLong("brutos"), rs.getLong("reembolsos"),
-                rs.getLong("comision"), rs.getLong("sin_comision")};
+                rs.getLong("comision"), rs.getLong("sin_comision"), rs.getLong("descuentos")};
     }
 
     private static SalesReportRow fila(String grupo, long[] m, Double ocupacion) {
         long netos = m[1] - m[2];
-        return new SalesReportRow(grupo, m[0], m[1], m[2], netos, m[3], netos - m[3], ocupacion);
+        return new SalesReportRow(grupo, m[0], m[1], m[5], m[2], netos, m[3], netos - m[3], ocupacion);
     }
 
     /**

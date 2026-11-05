@@ -14,7 +14,9 @@ US-153, US-166 (lado de booking) · **Puerto:** 18004 · **BD:** `tripbus_bookin
 
 | Método | Endpoint | Descripción |
 |---|---|---|
-| POST | `/bookings` `{holdId, pasajeros:[{nombre, tipoDocumento, numeroDocumento}]}` | Crea la reserva y calcula el total (Catalog o Flash Offers). |
+| POST | `/bookings` `{holdId, pasajeros:[{nombre, tipoDocumento, numeroDocumento, tipoPasajero?}], cupon?}` | Crea la reserva; el total lo calcula catalog por pasajero y tramo (**US-138/US-141/US-142**) menos el cupón (**US-147**). Ver "Cómo se calcula el total". |
+| GET | `/payments/{id}/receipt.pdf` · `/refunds/{id}/receipt.pdf` | **US-146**: comprobante de pago o de reembolso (dueño, OPERADOR de la empresa, ADMIN). |
+| POST · GET · PUT · DELETE | `/coupons` · `/coupons/{id}` | **US-147**: cupones (ADMIN: TripBus y cualquier empresa; OPERADOR: su empresa). |
 | POST | `/bookings/{id}/pay` + header **`Idempotency-Key`** `{cardToken, cardLast4}` | Inicia el pago (202). Reintentos con la misma llave devuelven la misma respuesta. |
 | GET | `/bookings` · `/bookings/{id}` · `/bookings/{id}/saga` | Mis reservas, detalle y bitácora de la saga. |
 | GET | `/bookings?scope=proximos\|pasados&page=0&size=10` | **US-145**: mis viajes próximos o pasados, paginado (ver abajo). |
@@ -252,6 +254,63 @@ Al reprogramar (US-150 y no-show), si la reserva tiene `offer_id` se consulta fl
 → `503 OFFERS_UNAVAILABLE`. Las reservas **afectadas por la empresa** (US-154) siempre se pueden reprogramar gratis o
 reembolsar, aunque sean de oferta: el pasajero no tiene la culpa.
 
+### Cómo se calcula el total (US-138, US-141 y US-142, Sprint 6)
+
+`POST /bookings` acepta por pasajero `tipoPasajero` (`ADULTO` por defecto, `NINO` o `ADULTO_MAYOR`) y toma de la
+retención de seat-inventory el tramo (`fromOrden`/`toOrden`; sin ellos = el viaje completo). El precio lo calcula
+**catalog** con `POST /internal/pricing` (`X-Internal-Token`):
+
+```json
+// pedido
+{"itineraryId": "…", "fromOrden": 2, "toOrden": 4,
+ "pasajeros": [{"asiento": "1", "tipoPasajero": "ADULTO"}, {"asiento": "2", "tipoPasajero": "NINO"}]}
+// respuesta (un precio por pasajero, en el mismo orden)
+{"itineraryId": "…", "estado": "PROGRAMADO", "moneda": "COP",
+ "tramo": {"fromOrden": 2, "paradaAbordaje": "Fusagasugá", "toOrden": 4, "paradaBajada": "Ibagué"},
+ "pasajeros": [{"asiento": "1", "tipoPasajero": "ADULTO", "categoriaAsiento": "VIP", "precioBase": 100000,
+                "descuentoTipo": 0, "recargoCategoria": 15000, "precio": 115000}, …]}
+```
+
+- `precio` de cada pasajero ya incluye el tramo, la temporada, el tipo de pasajero y el recargo por categoría de asiento.
+  Booking guarda el **desglose por pasajero** (tipo, categoría, precio base, descuento por tipo, recargo y precio).
+- **subtotal** = suma de los precios; **total** = subtotal − descuento del cupón (lo que se paga y sobre lo que se
+  calcula la comisión de TripBus).
+- Si catalog no responde (o responde incompleto): `503 PRICING_UNAVAILABLE` y la reserva **no se crea**. Si el viaje ya
+  no está `PROGRAMADO`: `409 ITINERARY_NOT_AVAILABLE`. Un `tipoPasajero` desconocido: `400`.
+- Una retención de **oferta relámpago** conserva el precio de la oferta para cada asiento (sin cupones).
+- La **reprogramación** (con los tipos de pasajero de la reserva original) y la **taquilla** (viaje completo) usan el
+  mismo cálculo. Reprogramar un tramo exige la misma parada de abordaje y de bajada (`409 SEGMENT_MISMATCH`).
+- **Tramo** (US-142): la reserva y el tiquete guardan la parada de abordaje y la de bajada (`tramo` en las
+  respuestas); el PDF y el correo del tiquete muestran "Sube en / Baja en"; el manifiesto agrupa a los pasajeros por
+  parada de abordaje (`porParada`, en el orden de la ruta) y marca dónde se baja cada uno (también en el CSV).
+
+### Cupones de descuento (US-147, Sprint 6)
+
+- **CRUD** en `/coupons` (`POST`, `GET ?companyId=`, `GET /{id}`, `PUT /{id}`, `DELETE /{id}` = desactivar): el ADMIN
+  administra los cupones de TripBus (`companyId` null, sirven en cualquier empresa) y los de cualquier empresa; el
+  OPERADOR solo los de su empresa (los demás responden 404 y pedir otra empresa responde 403).
+- Campos: `codigo` (único **sin distinguir mayúsculas**), `tipo` `PORCENTAJE` (hasta 100) o `VALOR`, `valor`,
+  `companyId`, `vigenteDesde`/`vigenteHasta`, `usosMaximos` y `usosPorUsuario` (null = sin límite), `compraMinima`,
+  `routeIds` (vacío = cualquier ruta) y `activo`.
+- `POST /bookings` acepta `cupon`. Se valida en este orden y cada regla tiene su error: no existe o inactivo `404
+  COUPON_NOT_FOUND`; tarifa de oferta `409 COUPON_NOT_COMBINABLE`; aún no vigente `409 COUPON_NOT_YET_VALID`; vencido
+  `409 COUPON_EXPIRED`; de otra empresa o de otra ruta `409 COUPON_NOT_APPLICABLE`; compra mínima `409
+  COUPON_MINIMUM_NOT_MET`; sin usos `409 COUPON_EXHAUSTED`; límite del usuario `409 COUPON_USER_LIMIT_REACHED`.
+- **Descuento**: porcentaje del subtotal (al peso más cercano) o valor fijo, nunca más que el subtotal. Se resta antes
+  del pago y queda en la reserva (`descuentoCupon`, `cuponCodigo`).
+- **Usos atómicos**: `UPDATE coupons SET usos = usos + 1 WHERE … AND usos < usos_maximos` en la misma transacción que
+  crea la reserva; con muchas compras simultáneas solo las primeras `usosMaximos` lo logran (las demás: `409
+  COUPON_EXHAUSTED`, y no se crea la reserva). Si la reserva **vence** o el pago se **rechaza**, el uso se libera.
+- Los reportes de ventas tienen la columna `descuentoCupones` (también en el CSV).
+
+### Comprobantes (US-146, Sprint 6)
+
+`GET /payments/{id}/receipt.pdf` (pago aprobado; si no, `409 RECEIPT_NOT_AVAILABLE`) y `GET /refunds/{id}/receipt.pdf`:
+número de comprobante consecutivo (`TB-00000001`, compartido por pagos y reembolsos y fijo desde la primera vez),
+fecha (hora de Colombia), empresa y NIT (de catalog `GET /internal/companies/{id}`; si no lo trae, solo el nombre),
+método de pago con los últimos 4 dígitos, desglose por pasajero, cupón aplicado y total. **No** muestra la comisión.
+Solo el dueño de la reserva, el OPERADOR de su empresa y el ADMIN; los demás reciben 404.
+
 ### Comisión de TripBus (US-190)
 
 Modelo de negocio: cada empresa paga una **cuota mensual** y una **comisión por tiquete**; ambas condiciones viven en
@@ -436,10 +495,43 @@ no usa JWT: se autentica con la firma HMAC del header `X-Signature`.
 - `/actuator/info`: versión y fecha del build, y `app.commit` (el commit con el que se construyó la imagen).
 - Cada petición lleva un `requestId`: se reutiliza el header `X-Request-Id` (lo manda el API Gateway)
   o se genera uno, y se devuelve en la respuesta. Booking lo **propaga** en sus llamadas salientes a
-  seat-inventory, catalog y flash-offers, así una petición se sigue entre servicios. Logs legibles con
-  `[requestId]` en IDE/QA y JSON (con `requestId` y `"service":"booking-payment-service"`) en PROD.
+  seat-inventory, catalog y flash-offers, así una petición se sigue entre servicios.
 - El log de acceso solo registra método, ruta, estado y duración: nunca cuerpos de petición (no se
   registran datos de pago).
+
+### Trazas, logs y métricas (HT-10, Sprint 5)
+
+| Variable | Por defecto | Qué hace |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (vacía) | Exporta las trazas por OTLP/HTTP a `{endpoint}/v1/traces`. Vacía = no se exportan (siguen los `traceId`/`spanId` en los logs). |
+| `TRACING_SAMPLING` | `0.1` | Fracción de trazas muestreadas. |
+| `LOG_FORMAT` | texto (`json` en `prod`) | `json` = logs estructurados ECS (`logging.structured.format.console=ecs`). |
+| `OPENAPI_SERVER_URL` | (vacía) | Servidor que declara el documento OpenAPI (p. ej. el API Gateway) para que "Try it out" pase por él. |
+
+- **Trazas** (Micrometer Tracing sobre OpenTelemetry): cada petición es un span; el contexto (`traceparent`, W3C)
+  viaja en los RestClient (seat-inventory, catalog, flash-offers, identity), en los eventos de Redis Streams (campo
+  `traceparent`; el consumidor procesa cada evento en un span hijo) y en el webhook de la pasarela simulada (sale en
+  otro hilo pero sigue en la traza del cobro).
+- **Logs**: cada línea lleva `requestId`, `traceId`, `spanId` y `bookingId` cuando la petición (`/bookings/{id}/...`),
+  el evento o el paso de la saga es de una reserva. En texto: `[requestId] [bookingId] [traceId,spanId]`; en ECS, campos
+  con esos nombres. Nunca números de documento, teléfonos ni correos completos (los correos van enmascarados).
+- **Métricas de negocio** (`/actuator/prometheus`, tag `application=booking-payment-service`):
+
+| Métrica | Etiquetas |
+|---|---|
+| `tripbus_pagos_total` | `metodo` (TARJETA, PSE, NEQUI, EFECTIVO), `resultado` (aprobado, rechazado, monto_incorrecto, aprobado_tardio, pasarela_no_disponible, sin_respuesta) |
+| `tripbus_reembolsos_total` | `causa` (asiento_no_confirmado, aprobado_tardio, afectada_por_la_empresa, reprogramacion_no_aplicable...) |
+| `tripbus_sagas_recuperadas_total` | — (sagas que retomó o cerró `SagaRecoveryJob`) |
+| `tripbus_tiquetes_emitidos_total` | `canal` (APP, TAQUILLA) |
+| `tripbus_pago_hasta_tiquete_segundos` | Timer desde el pago hasta el tiquete; en Prometheus `tripbus_pago_hasta_tiquete_segundos_seconds_count/_sum/_max` |
+
+### Datos de un usuario eliminado (US-131, Sprint 5)
+
+Con el evento `UserDeleted {userId}` de identity, en las reservas del usuario se borran `email_contacto` y los datos
+del comprador de taquilla (nombre, correo y teléfono) y se marca `usuario_eliminado_en`. Se conservan el nombre y el
+documento de los pasajeros (manifiesto y contabilidad); solo se anonimizan los de reservas que nunca se pagaron
+(`PAGO_RECHAZADO` o `EXPIRADA`). Sus reservas futuras siguen válidas, pero sin correo el tiquete ya no se envía ni se
+reenvía (`409 NO_CONTACT_EMAIL`). Idempotente por `eventId`.
 
 ## Pruebas
 
@@ -478,6 +570,21 @@ mvn -B verify      # unitarias + integración con PostgreSQL y Redis reales (Tes
   ruta (también caída y en bloques de 200); CSV; otra empresa; facturación de la plataforma solo para ADMIN. La
   comisión por webhook y la del aprobado tardío están en `BookingSagaIT`; las reglas una a una en `ComisionUnitTest`
   y `ReportControllerTest`.
+- `ObservabilidadYUsuarioEliminadoIT` (Sprint 5, con la observabilidad encendida y el consumidor del stream activo):
+  `UserDeleted` borra el contacto y los datos del comprador, conserva los pasajeros de los viajes, anonimiza los de las
+  reservas no pagadas, el tiquete ya no se reenvía y el evento repetido no se vuelve a procesar; el `traceparent` viaja
+  en el evento (el consumidor sigue la misma traza y pone el `bookingId` en el MDC), en los RestClient y en el webhook
+  de la pasarela simulada; cada línea de log lleva requestId, bookingId, traceId y spanId (texto o ECS); las métricas
+  de negocio salen en Prometheus. Las piezas una a una en `ObservabilidadUnitTest`, `ObservabilidadEnvironmentTest` y
+  `EventConsumerTest`; las métricas de los flujos reales en `BookingSagaIT` y `SagaRecoveryJobTest`.
+- `TarifasCuponesYComprobantesIT` (Sprint 6): precio con tipos de pasajero y categorías de asiento; catalog caído (503,
+  sin reserva); tramo en la reserva, el tiquete, el PDF y el manifiesto (agrupado por parada); comprobantes de pago y de
+  reembolso (número consecutivo, NIT, últimos 4, cupón, sin comisión, acceso por rol) y pago sin aprobar; cupón vencido,
+  aún no vigente, de otra empresa, de otra ruta, con compra mínima, agotado, por usuario y con oferta; uso liberado al
+  vencer y al rechazarse el pago; **50 hilos con un cupón de 10 usos (exactamente 10 lo logran)**; CRUD por rol;
+  comisión sobre lo pagado y descuento en los reportes. Las reglas una a una en `TarifasYCuponesUnitTest`,
+  `CatalogPricingTest` y `ReceiptServiceTest`. Las IT anteriores simulan `/internal/pricing` desde el precio base del
+  viaje (`support/PreciosDePrueba`).
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -495,10 +602,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-11-02) | Mínimo |
+| Métrica | Medido (2026-11-05) | Mínimo |
 |---|---|---|
-| Líneas | 96,2 % | `jacoco.minimo.lineas` = 0.95 |
-| Ramas | 90,6 % | `jacoco.minimo.ramas` = 0.90 |
+| Líneas | 97,0 % | `jacoco.minimo.lineas` = 0.95 |
+| Ramas | 91,5 % | `jacoco.minimo.ramas` = 0.90 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y

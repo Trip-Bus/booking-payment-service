@@ -36,7 +36,7 @@ final class TicketPdf {
     /** Lo que va en el PDF. Los datos del viaje pueden ser null (catalog no respondió y la reserva no los tiene). */
     record Datos(UUID ticketId, UUID bookingId, String estado, String origen, String destino, Instant fechaSalida,
                  String empresa, String placa, List<String> asientos, List<PassengerResponse> pasajeros,
-                 BigDecimal total, String moneda, String qrCode) {
+                 BigDecimal total, String moneda, String qrCode, String paradaAbordaje, String paradaBajada) {
     }
 
     static byte[] render(Datos d) {
@@ -63,6 +63,11 @@ final class TicketPdf {
                 : FECHA.format(d.fechaSalida().atZone(TicketMailService.ZONA)) + " (hora de Colombia)", negrita, normal);
         fila(viaje, "Empresa", d.empresa(), negrita, normal);
         fila(viaje, "Placa", d.placa(), negrita, normal);
+        if (d.paradaAbordaje() != null || d.paradaBajada() != null) {
+            // US-142: compró un tramo del viaje.
+            fila(viaje, "Sube en", d.paradaAbordaje(), negrita, normal);
+            fila(viaje, "Baja en", d.paradaBajada(), negrita, normal);
+        }
         fila(viaje, "Asientos", String.join(", ", d.asientos()), negrita, normal);
         fila(viaje, "Total", d.total().toPlainString() + " " + d.moneda(), negrita, normal);
         document.add(viaje);
@@ -99,12 +104,13 @@ final class TicketPdf {
         }
     }
 
-    private static void fila(PdfPTable table, String etiqueta, String valor, Font fEtiqueta, Font fValor) {
+    /** Fila etiqueta / valor de una tabla (también la usa ReceiptPdf). */
+    static void fila(PdfPTable table, String etiqueta, String valor, Font fEtiqueta, Font fValor) {
         table.addCell(celda(etiqueta, fEtiqueta));
         table.addCell(celda(valor, fValor));
     }
 
-    private static PdfPCell celda(String texto, Font font) {
+    static PdfPCell celda(String texto, Font font) {
         PdfPCell cell = new PdfPCell(new Phrase(texto == null || texto.isBlank() ? SIN_DATO : texto, font));
         cell.setPadding(4);
         cell.setBorderColor(Color.LIGHT_GRAY);

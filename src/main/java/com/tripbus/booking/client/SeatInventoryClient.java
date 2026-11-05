@@ -2,6 +2,7 @@ package com.tripbus.booking.client;
 
 import com.tripbus.booking.config.BookingProperties;
 import com.tripbus.booking.config.RequestIdPropagationInterceptor;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
@@ -21,21 +22,37 @@ public class SeatInventoryClient {
 
     private final RestClient restClient;
 
+    public SeatInventoryClient(BookingProperties properties, String token) {
+        this(properties, token, ObservationRegistry.NOOP);
+    }
+
+    /** HT-10: con el ObservationRegistry de Spring cada llamada es un span y lleva el traceparent. */
+    @org.springframework.beans.factory.annotation.Autowired
     public SeatInventoryClient(BookingProperties properties,
-                               @org.springframework.beans.factory.annotation.Value("${tripbus.internal-token}") String token) {
+                               @org.springframework.beans.factory.annotation.Value("${tripbus.internal-token}") String token,
+                               ObservationRegistry observations) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(1000);
         factory.setReadTimeout(5000);
         this.restClient = RestClient.builder()
                 .baseUrl(properties.seatInventoryUrl())
                 .requestFactory(factory)
+                .observationRegistry(observations)
                 .defaultHeader("X-Internal-Token", token)
                 .requestInterceptor(new RequestIdPropagationInterceptor())
                 .build();
     }
 
+    /** fromOrden/toOrden: tramo retenido (US-142); null = el viaje completo. */
     public record Hold(UUID holdId, UUID itineraryId, List<String> seatNumbers, UUID userId, UUID offerId,
-                       UUID bookingId, String estado, Instant expiraEn, long segundosRestantes) {
+                       UUID bookingId, String estado, Instant expiraEn, long segundosRestantes, Integer fromOrden,
+                       Integer toOrden) {
+
+        public Hold(UUID holdId, UUID itineraryId, List<String> seatNumbers, UUID userId, UUID offerId,
+                    UUID bookingId, String estado, Instant expiraEn, long segundosRestantes) {
+            this(holdId, itineraryId, seatNumbers, userId, offerId, bookingId, estado, expiraEn, segundosRestantes,
+                    null, null);
+        }
     }
 
     /** Estado de un asiento en GET /seats/itineraries/{id} (DISPONIBLE, RETENIDO, VENDIDO, EN_OFERTA, BLOQUEADO). */

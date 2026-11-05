@@ -51,7 +51,8 @@ class ConfirmarReprogramacionTest {
                 mock(WebhookLogRepository.class), seatInventory, mock(PaymentGateway.class), mock(WebhookSigner.class),
                 ticketService, mock(TicketMailService.class), rescheduleSaga, mock(SagaLogger.class),
                 mock(EventPublisher.class), tx, new ObjectMapper(), Clock.fixed(AHORA, ZoneOffset.UTC),
-                mock(CommissionService.class));
+                mock(CommissionService.class), new com.tripbus.booking.observabilidad.MetricasBooking(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                mock(CouponService.class));
 
         Booking origen = new Booking(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), null, List.of("12"),
                 new BigDecimal("95000"), "COP", AHORA, AHORA);

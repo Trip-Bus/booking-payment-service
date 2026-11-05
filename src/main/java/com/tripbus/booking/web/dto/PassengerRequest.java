@@ -15,5 +15,13 @@ public record PassengerRequest(
 
         @NotBlank(message = "El número de documento es obligatorio")
         @Pattern(regexp = "[A-Za-z0-9-]{4,20}", message = "Número de documento inválido")
-        String numeroDocumento) {
+        String numeroDocumento,
+
+        /* US-138: ADULTO (por defecto), NINO o ADULTO_MAYOR. */
+        @Pattern(regexp = "(?i)ADULTO|NINO|ADULTO_MAYOR", message = "Tipo de pasajero inválido (ADULTO, NINO o ADULTO_MAYOR)")
+        String tipoPasajero) {
+
+    public PassengerRequest(String nombre, String tipoDocumento, String numeroDocumento) {
+        this(nombre, tipoDocumento, numeroDocumento, null);
+    }
 }

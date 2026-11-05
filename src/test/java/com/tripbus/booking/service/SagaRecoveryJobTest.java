@@ -16,6 +16,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -33,12 +34,14 @@ class SagaRecoveryJobTest {
     private final PaymentService paymentService = mock(PaymentService.class);
     private final RescheduleSaga rescheduleSaga = mock(RescheduleSaga.class);
     private final LeaderLock leaderLock = mock(LeaderLock.class);
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry registry =
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
     private SagaRecoveryJob job;
 
     @BeforeEach
     void preparar() {
         job = new SagaRecoveryJob(bookings, payments, tickets, paymentService, rescheduleSaga, leaderLock,
-                Clock.fixed(AHORA, ZoneOffset.UTC));
+                Clock.fixed(AHORA, ZoneOffset.UTC), new com.tripbus.booking.observabilidad.MetricasBooking(registry));
         when(leaderLock.runIfLeader(anyString(), any(), any())).thenAnswer(inv -> {
             inv.<Runnable>getArgument(2).run();
             return true;
@@ -61,6 +64,8 @@ class SagaRecoveryJobTest {
         verify(paymentService).confirmAndIssue(aprobada);
         verify(paymentService).failPayment(pago, PaymentService.SIN_RESPUESTA);
         verify(rescheduleSaga).anularAsientosAnteriores(reprogramada);
+        // HT-10: tripbus_sagas_recuperadas_total cuenta las tres.
+        assertThat(registry.get("tripbus.sagas.recuperadas").counter().count()).isEqualTo(3.0);
     }
 
     @Test

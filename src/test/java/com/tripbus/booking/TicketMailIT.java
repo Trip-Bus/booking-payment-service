@@ -127,6 +127,7 @@ class TicketMailIT {
     void preparar() throws Exception {
         smtp.purgeEmailFromAllMailboxes();
         reset(seatInventory, catalog, gateway, mailSender);
+        com.tripbus.booking.support.PreciosDePrueba.desdePrecioBase(catalog);
         when(catalog.price(itineraryId)).thenReturn(
                 new CatalogClient.Price(itineraryId, new BigDecimal("95000"), "COP", "PROGRAMADO"));
         when(catalog.itinerary(itineraryId)).thenReturn(new CatalogClient.ItinerarySummary(itineraryId, "Bogotá",

@@ -1,5 +1,6 @@
 package com.tripbus.booking.service;
 
+import com.tripbus.booking.observabilidad.MetricasBooking;
 import com.tripbus.booking.client.RemoteErrors;
 import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
@@ -60,13 +61,15 @@ public class AffectedRefundService {
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final MetricasBooking metricas;
 
     @SuppressWarnings("java:S107") // dependencias del reembolso, inyectadas por Spring
     public AffectedRefundService(AffectedBookingRepository affectedRepository, BookingRepository bookingRepository,
                                  TicketRepository ticketRepository, PaymentRepository paymentRepository,
                                  RefundRepository refundRepository, PaymentGateway gateway,
                                  SeatInventoryClient seatInventory, SagaLogger saga, EventPublisher events,
-                                 TransactionTemplate tx, Clock clock) {
+                                 TransactionTemplate tx, Clock clock, MetricasBooking metricas) {
+        this.metricas = metricas;
         this.affectedRepository = affectedRepository;
         this.bookingRepository = bookingRepository;
         this.ticketRepository = ticketRepository;
@@ -144,6 +147,7 @@ public class AffectedRefundService {
         }
         Refund refund = refundRepository.save(Refund.de(payment, payment.getMonto(), "AFECTADA_POR_LA_EMPRESA",
                 now));
+        metricas.despuesDelCommit(() -> metricas.reembolso("AFECTADA_POR_LA_EMPRESA"));
         payment.reembolsar(now);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("bookingId", booking.getId());

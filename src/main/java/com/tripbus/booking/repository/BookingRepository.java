@@ -91,4 +91,24 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
     /** US-172: empresa del viaje según sus reservas (si catalog no responde). */
     @Query("select distinct b.companyId from Booking b where b.itineraryId = :itineraryId and b.companyId is not null")
     List<UUID> findCompanyIdsByItineraryId(@Param("itineraryId") UUID itineraryId);
+
+    /**
+     * US-131: borra los datos de contacto del usuario eliminado en todas sus reservas. {@code versioned} sube la
+     * versión: un proceso que tenía la reserva cargada no puede volver a escribir el correo.
+     */
+    @Modifying
+    @Query("update versioned Booking b set b.emailContacto = null, b.compradorNombre = null, b.compradorEmail = null,"
+            + " b.compradorTelefono = null, b.usuarioEliminadoEn = :ahora"
+            + " where b.userId = :userId and b.usuarioEliminadoEn is null")
+    int borrarDatosDeContacto(@Param("userId") UUID userId, @Param("ahora") Instant ahora);
+
+    /**
+     * US-131: en las reservas del usuario que nunca se pagaron (no hacen falta para el manifiesto ni la contabilidad)
+     * también se anonimizan los pasajeros.
+     */
+    @Modifying
+    @Query(value = "UPDATE passengers SET nombre = 'Usuario eliminado', numero_documento = 'ELIMINADO'"
+            + " WHERE booking_id IN (SELECT id FROM bookings WHERE user_id = :userId"
+            + " AND estado IN ('PAGO_RECHAZADO', 'EXPIRADA')) AND numero_documento <> 'ELIMINADO'", nativeQuery = true)
+    int anonimizarPasajerosSinViaje(@Param("userId") UUID userId);
 }

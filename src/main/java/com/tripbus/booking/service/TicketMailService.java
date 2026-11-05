@@ -203,6 +203,12 @@ public class TicketMailService {
         if (viaje != null && viaje.empresa() != null) {
             fila(sb, "Empresa", viaje.empresa());
         }
+        Booking.Tramo tramo = booking.getTramo();
+        if (tramo != null) {
+            // US-142: compró un tramo del viaje.
+            fila(sb, "Sube en", tramo.paradaAbordaje() != null ? tramo.paradaAbordaje() : "-");
+            fila(sb, "Baja en", tramo.paradaBajada() != null ? tramo.paradaBajada() : "-");
+        }
         fila(sb, "Asientos", String.join(", ", booking.getSeatNumbers()));
         fila(sb, "Pasajeros", String.join(", ", pasajeros));
         fila(sb, "Reserva", booking.getId().toString());
