@@ -85,7 +85,8 @@ public class ReportController {
     static String salesCsv(SalesReportResponse report) {
         boolean conOcupacion = "ruta".equals(report.agrupar());
         StringBuilder sb = new StringBuilder(
-                "grupo,tiquetes_vendidos,ingresos_brutos,reembolsos,ingresos_netos,comision_tripbus,neto_empresa");
+                "grupo,tiquetes_vendidos,ingresos_brutos,descuento_cupones,reembolsos,ingresos_netos,comision_tripbus,"
+                        + "neto_empresa");
         sb.append(conOcupacion ? ",ocupacion_promedio\n" : "\n");
         for (SalesReportRow fila : report.grupos()) {
             salesCsvRow(sb, fila, conOcupacion);
@@ -96,6 +97,7 @@ public class ReportController {
 
     private static void salesCsvRow(StringBuilder sb, SalesReportRow f, boolean conOcupacion) {
         sb.append(campo(f.grupo())).append(',').append(f.tiquetesVendidos()).append(',').append(f.ingresosBrutos())
+                .append(',').append(f.descuentoCupones())
                 .append(',').append(f.reembolsos()).append(',').append(f.ingresosNetos()).append(',')
                 .append(f.comisionTripBus()).append(',').append(f.netoEmpresa());
         if (conOcupacion) {

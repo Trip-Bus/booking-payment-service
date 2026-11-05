@@ -60,6 +60,7 @@ class RescheduleServiceTest {
 
     private final UUID userId = UUID.randomUUID();
     private final UUID viajeNuevo = UUID.randomUUID();
+    private final TarifaService tarifas = mock(TarifaService.class);
     private RescheduleService service;
     private Booking origen;
     private BookingViewer dueno;
@@ -91,7 +92,7 @@ class RescheduleServiceTest {
         return new RescheduleService(bookings, passengers, tickets, seatInventory, catalog, flashOffers,
                 bookingService, paymentService, mock(SagaLogger.class), mock(EventPublisher.class), tx,
                 new BookingProperties(null, null, null, null, "s", null, null, cargo), noShow,
-                Clock.fixed(AHORA, ZoneOffset.UTC));
+                Clock.fixed(AHORA, ZoneOffset.UTC), tarifas);
     }
 
     private Booking confirmada(UUID origenId) {
@@ -125,7 +126,15 @@ class RescheduleServiceTest {
     }
 
     private void precio(String valor, String moneda) {
-        when(bookingService.precio(any(), any())).thenReturn(new BookingService.Precio(new BigDecimal(valor), moneda));
+        // Como catalog: el mismo precio por asiento, para cada pasajero de la retención.
+        when(tarifas.calcular(any(SeatInventoryClient.Hold.class), any(), any())).thenAnswer(inv -> {
+            SeatInventoryClient.Hold hold = inv.getArgument(0);
+            List<TarifaService.PrecioPasajero> pasajeros = hold.seatNumbers().stream()
+                    .map(s -> new TarifaService.PrecioPasajero(s, "ADULTO", "ESTANDAR", new BigDecimal(valor),
+                            BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal(valor))).toList();
+            return new TarifaService.Tarifa(moneda, new BigDecimal(valor).multiply(BigDecimal.valueOf(pasajeros.size())),
+                    pasajeros, null, false);
+        });
     }
 
     private UUID retencion(UUID dueno, UUID itinerario, String estado, long segundos, String... asientos) {

@@ -168,6 +168,7 @@ class TaquillaYMisViajesIT {
     @BeforeEach
     void preparar() {
         reset(seatInventory, catalog, flashOffers, identity, gateway);
+        com.tripbus.booking.support.PreciosDePrueba.desdePrecioBase(catalog);
         companyId = UUID.randomUUID();
         operadorId = UUID.randomUUID();
         userId = UUID.randomUUID();

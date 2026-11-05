@@ -14,8 +14,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -51,8 +55,43 @@ public class ManifestService {
     public record Totales(int vendidos, int abordados, int pendientes) {
     }
 
+    /**
+     * US-142: pasajeros que suben en una parada (en el orden de la ruta). Cada uno lleva su paradaBajada; los que
+     * compraron el viaje completo suben en el origen y bajan en el destino.
+     */
+    public record Parada(String parada, Integer orden, List<ManifestRow> pasajeros) {
+    }
+
     public record Manifest(UUID itineraryId, String origen, String destino, Instant fechaSalida, String empresa,
-                           List<ManifestRow> pasajeros, Totales totales) {
+                           List<ManifestRow> pasajeros, Totales totales, List<Parada> porParada) {
+    }
+
+    /** Agrupa por parada de abordaje: primero el origen (viaje completo) y luego por orden de la parada en la ruta. */
+    static List<Parada> porParada(List<ManifestRow> pasajeros, String origen, String destino) {
+        Map<String, List<ManifestRow>> grupos = new LinkedHashMap<>();
+        Map<String, Integer> ordenes = new HashMap<>();
+        pasajeros.stream()
+                .map(p -> conParadas(p, origen, destino))
+                .sorted(Comparator.comparing((ManifestRow p) -> p.fromOrden() == null ? Integer.MIN_VALUE : p.fromOrden())
+                        .thenComparing(ManifestRow::asiento, ManifestService::compararAsientos))
+                .forEach(p -> {
+                    grupos.computeIfAbsent(p.paradaAbordaje(), k -> new ArrayList<>()).add(p);
+                    ordenes.putIfAbsent(p.paradaAbordaje(), p.fromOrden());
+                });
+        List<Parada> paradas = new ArrayList<>();
+        grupos.forEach((parada, lista) -> paradas.add(new Parada(parada, ordenes.get(parada), lista)));
+        return paradas;
+    }
+
+    /** Un pasajero del viaje completo sube en el origen y baja en el destino del viaje. */
+    private static ManifestRow conParadas(ManifestRow p, String origen, String destino) {
+        if (p.paradaAbordaje() != null && p.paradaBajada() != null) {
+            return p;
+        }
+        return new ManifestRow(p.nombre(), p.tipoDocumento(), p.numeroDocumento(), p.asiento(), p.bookingId(),
+                p.estadoTiquete(), p.abordadoEn(), p.fromOrden(),
+                p.paradaAbordaje() != null ? p.paradaAbordaje() : origen,
+                p.paradaBajada() != null ? p.paradaBajada() : destino);
     }
 
     public Manifest manifest(UUID itineraryId, Authentication authentication, String formato) {
@@ -74,9 +113,12 @@ public class ManifestService {
                 .sorted(Comparator.comparing(ManifestRow::asiento, ManifestService::compararAsientos))
                 .toList();
         int abordados = (int) pasajeros.stream().filter(p -> USADO.equals(p.estadoTiquete())).count();
-        return new Manifest(itineraryId, viaje != null ? viaje.origen() : null, viaje != null ? viaje.destino() : null,
-                viaje != null ? viaje.fechaSalida() : null, viaje != null ? viaje.empresa() : null, pasajeros,
-                new Totales(pasajeros.size(), abordados, pasajeros.size() - abordados));
+        String origen = viaje != null ? viaje.origen() : null;
+        String destino = viaje != null ? viaje.destino() : null;
+        return new Manifest(itineraryId, origen, destino, viaje != null ? viaje.fechaSalida() : null,
+                viaje != null ? viaje.empresa() : null, pasajeros,
+                new Totales(pasajeros.size(), abordados, pasajeros.size() - abordados),
+                porParada(pasajeros, origen, destino));
     }
 
     /** Empresa del viaje según catalog; si no responde, la que guardaron sus reservas (si es una sola). */
@@ -139,15 +181,19 @@ public class ManifestService {
     /** El mismo contenido en CSV (UTF-8, separado por comas, con los totales al final). */
     public static String toCsv(Manifest manifest) {
         StringBuilder sb = new StringBuilder();
-        sb.append("nombre,tipoDocumento,numeroDocumento,asiento,bookingId,estadoTiquete,abordadoEn\n");
-        for (ManifestRow p : manifest.pasajeros()) {
+        sb.append("nombre,tipoDocumento,numeroDocumento,asiento,bookingId,estadoTiquete,abordadoEn,paradaAbordaje,"
+                + "paradaBajada\n");
+        // US-142: en el orden en que suben (por parada de abordaje), con la parada donde baja cada uno.
+        for (ManifestRow p : manifest.porParada().stream().flatMap(g -> g.pasajeros().stream()).toList()) {
             sb.append(celda(p.nombre())).append(',')
                     .append(celda(p.tipoDocumento())).append(',')
                     .append(celda(p.numeroDocumento())).append(',')
                     .append(celda(p.asiento())).append(',')
                     .append(p.bookingId()).append(',')
                     .append(celda(p.estadoTiquete())).append(',')
-                    .append(p.abordadoEn() != null ? p.abordadoEn().toString() : "").append('\n');
+                    .append(p.abordadoEn() != null ? p.abordadoEn().toString() : "").append(',')
+                    .append(celda(p.paradaAbordaje())).append(',')
+                    .append(celda(p.paradaBajada())).append('\n');
         }
         Totales t = manifest.totales();
         sb.append('\n')

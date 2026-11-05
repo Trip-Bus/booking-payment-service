@@ -1,7 +1,6 @@
 package com.tripbus.booking.service;
 
 import com.tripbus.booking.client.CatalogClient;
-import com.tripbus.booking.client.FlashOffersClient;
 import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.common.events.EventPublisher;
@@ -21,13 +20,13 @@ import com.tripbus.booking.web.dto.PassengerRequest;
 import com.tripbus.booking.web.dto.PassengerResponse;
 import com.tripbus.booking.web.dto.PaymentSummary;
 import com.tripbus.booking.web.dto.SagaStepResponse;
+import com.tripbus.booking.web.dto.TramoResponse;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -45,17 +44,22 @@ public class BookingService {
     private final SagaLogRepository sagaLogRepository;
     private final SeatInventoryClient seatInventory;
     private final CatalogClient catalog;
-    private final FlashOffersClient flashOffers;
     private final SagaLogger saga;
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final TarifaService tarifas;
+    private final CouponService coupons;
 
+    @SuppressWarnings("java:S107") // dependencias de la compra, inyectadas por Spring
     public BookingService(BookingRepository bookingRepository, PassengerRepository passengerRepository,
                           PaymentRepository paymentRepository, TicketRepository ticketRepository,
                           SagaLogRepository sagaLogRepository, SeatInventoryClient seatInventory,
-                          CatalogClient catalog, FlashOffersClient flashOffers, SagaLogger saga,
-                          EventPublisher events, TransactionTemplate tx, Clock clock) {
+                          CatalogClient catalog, SagaLogger saga,
+                          EventPublisher events, TransactionTemplate tx, Clock clock, TarifaService tarifas,
+                          CouponService coupons) {
+        this.tarifas = tarifas;
+        this.coupons = coupons;
         this.bookingRepository = bookingRepository;
         this.passengerRepository = passengerRepository;
         this.paymentRepository = paymentRepository;
@@ -63,7 +67,6 @@ public class BookingService {
         this.sagaLogRepository = sagaLogRepository;
         this.seatInventory = seatInventory;
         this.catalog = catalog;
-        this.flashOffers = flashOffers;
         this.saga = saga;
         this.events = events;
         this.tx = tx;
@@ -96,24 +99,40 @@ public class BookingService {
                     "Debe registrar un viajero por cada asiento retenido (" + hold.seatNumbers().size() + ")");
         }
 
-        Precio precio = precio(hold, userId);
+        // US-138/US-141: el precio lo calcula catalog (tramo, temporada, tipo de pasajero y categoría del asiento).
+        List<String> tipos = request.pasajeros().stream().map(p -> TarifaService.tipo(p.tipoPasajero())).toList();
+        TarifaService.Tarifa tarifa = tarifas.calcular(hold, tipos, userId);
         // US-005: empresa del itinerario para la visibilidad del OPERADOR. Si catalog no responde la
         // reserva se crea igual, sin empresa (solo la verán su dueño y ADMIN).
         CatalogClient.ItinerarySummary itinerario = catalog.itinerary(hold.itineraryId());
         UUID companyId = itinerario != null ? itinerario.companyId() : null;
+        UUID routeId = itinerario != null ? itinerario.routeId() : null;
+        // US-147: el cupón se valida antes de crear la reserva y su uso se gasta en la misma transacción.
+        CouponService.Descuento descuento = request.cupon() == null || request.cupon().isBlank() ? null
+                : coupons.validar(request.cupon(), new CouponService.Uso(companyId, routeId, tarifa.subtotal(),
+                tarifa.deOferta(), userId));
 
         try {
             BookingResponse response = tx.execute(status -> {
                 Instant now = clock.instant();
                 Booking nueva = new Booking(hold.holdId(), userId, hold.itineraryId(), hold.offerId(),
-                        hold.seatNumbers(), precio.unitario(), precio.moneda(), hold.expiraEn(), emailContacto,
+                        hold.seatNumbers(), tarifa.subtotal(), tarifa.moneda(), hold.expiraEn(), emailContacto,
                         companyId, now);
+                nueva.asignarTarifa(tarifa.subtotal(), descuento != null ? descuento.valor() : null,
+                        descuento != null ? descuento.couponId() : null, descuento != null ? descuento.codigo() : null);
+                nueva.asignarTramo(tarifa.tramo());
+                nueva.asignarRuta(routeId);
                 nueva.asignarViaje(viajeDe(itinerario));
                 Booking booking = bookingRepository.save(nueva);
                 for (int i = 0; i < request.pasajeros().size(); i++) {
                     PassengerRequest p = request.pasajeros().get(i);
-                    passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
-                            p.numeroDocumento().trim(), hold.seatNumbers().get(i)));
+                    Passenger pasajero = new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
+                            p.numeroDocumento().trim(), hold.seatNumbers().get(i));
+                    tarifa.pasajeros().get(i).aplicarA(pasajero);
+                    passengerRepository.save(pasajero);
+                }
+                if (descuento != null) {
+                    coupons.redimir(descuento, booking.getId(), userId);
                 }
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("bookingId", booking.getId());
@@ -134,24 +153,6 @@ public class BookingService {
         }
     }
 
-    record Precio(BigDecimal unitario, String moneda) {
-    }
-
-    /** Precio por asiento de la retención: el de la oferta relámpago si viene de una, o el de catalog. */
-    Precio precio(SeatInventoryClient.Hold hold, UUID userId) {
-        if (hold.offerId() != null) {
-            FlashOffersClient.OfferReservation reservation = flashOffers.reservationByHold(hold.offerId(), hold.holdId());
-            if (!userId.equals(reservation.userId())) {
-                throw ApiException.forbidden("OFFER_RESERVATION_MISMATCH", "La reserva de oferta no pertenece al usuario");
-            }
-            return new Precio(reservation.precioOferta(), "COP");
-        }
-        CatalogClient.Price price = catalog.price(hold.itineraryId());
-        if (!"PROGRAMADO".equals(price.estado())) {
-            throw ApiException.conflict("ITINERARY_NOT_AVAILABLE", "El viaje ya no está disponible");
-        }
-        return new Precio(price.precioBase(), price.moneda());
-    }
 
     @Transactional(readOnly = true)
     public BookingResponse get(UUID bookingId, BookingViewer viewer) {
@@ -182,6 +183,7 @@ public class BookingService {
             Booking booking = bookingRepository.lockById(b.getId()).orElseThrow();
             if (booking.getEstado() == BookingStatus.PENDIENTE_PAGO) {
                 booking.cambiarEstado(BookingStatus.EXPIRADA, clock.instant());
+                coupons.liberar(booking.getId());
                 saga.log(booking.getId(), "RETENCION_EXPIRADA", "OK", Map.of("holdId", holdId));
             }
         });
@@ -222,12 +224,19 @@ public class BookingService {
         return new BookingResponse(booking.getId(), booking.getEstado().name(), booking.getHoldId(),
                 booking.getItineraryId(), booking.getOfferId(), booking.getSeatNumbers(), pasajeros,
                 booking.getPrecioUnitario(), booking.getTotal(), booking.getMoneda(), booking.getHoldExpiraEn(),
-                pago, ticketId, booking.getOrigenBookingId(), booking.getCreadoEn(), booking.getActualizadoEn());
+                pago, ticketId, booking.getOrigenBookingId(), booking.getCreadoEn(), booking.getActualizadoEn(),
+                booking.getSubtotal() != null ? booking.getSubtotal() : booking.getTotal(), booking.getDescuentoCupon(),
+                booking.getCuponCodigo(), tramo(booking.getTramo()));
+    }
+
+    static TramoResponse tramo(Booking.Tramo tramo) {
+        return tramo == null ? null
+                : new TramoResponse(tramo.fromOrden(), tramo.paradaAbordaje(), tramo.toOrden(), tramo.paradaBajada());
     }
 
     static PassengerResponse toPassengerResponse(Passenger p) {
         return new PassengerResponse(p.getId(), p.getNombre(), p.getTipoDocumento(), p.getNumeroDocumento(),
-                p.getAsiento());
+                p.getAsiento(), p.getTipoPasajero(), p.getCategoriaAsiento(), p.getPrecio());
     }
 
     static PaymentSummary toSummary(Payment p) {

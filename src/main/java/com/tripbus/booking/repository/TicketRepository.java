@@ -92,7 +92,8 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
      * ANULADO no van en el manifiesto.
      */
     @Query("select new com.tripbus.booking.repository.ManifestRow(p.nombre, p.tipoDocumento, p.numeroDocumento, "
-            + "p.asiento, b.id, t.estado, t.usadoEn) from Passenger p, Booking b, Ticket t "
+            + "p.asiento, b.id, t.estado, t.usadoEn, b.fromOrden, b.paradaAbordaje, b.paradaBajada) "
+            + "from Passenger p, Booking b, Ticket t "
             + "where p.bookingId = b.id and t.bookingId = b.id and b.itineraryId = :itineraryId "
             + "and t.estado in ('EMITIDO', 'USADO')")
     List<ManifestRow> findManifest(@Param("itineraryId") UUID itineraryId);

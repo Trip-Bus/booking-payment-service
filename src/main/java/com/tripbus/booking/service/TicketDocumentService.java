@@ -114,6 +114,7 @@ public class TicketDocumentService {
                 b.getFechaSalida() != null || it == null ? b.getFechaSalida() : it.fechaSalida(),
                 b.getEmpresaNombre() != null || it == null ? b.getEmpresaNombre() : it.empresa(),
                 it != null ? it.placa() : null,
-                b.getSeatNumbers(), pasajeros, b.getTotal(), b.getMoneda(), v.ticket().getQrCode()));
+                b.getSeatNumbers(), pasajeros, b.getTotal(), b.getMoneda(), v.ticket().getQrCode(),
+                v.ticket().getParadaAbordaje(), v.ticket().getParadaBajada()));
     }
 }

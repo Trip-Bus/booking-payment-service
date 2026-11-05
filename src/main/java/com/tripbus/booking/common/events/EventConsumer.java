@@ -2,8 +2,12 @@ package com.tripbus.booking.common.events;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tripbus.booking.config.RequestIdFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -36,6 +40,10 @@ public class EventConsumer implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(EventConsumer.class);
     private static final int MAX_ATTEMPTS = 3;
+    /** Clave del MDC con la reserva del evento o de la petición en curso. */
+    public static final String BOOKING_ID = RequestIdFilter.MDC_BOOKING;
+
+    private final EventTrace trace;
 
     private final RedisConnectionFactory connectionFactory;
     private final StringRedisTemplate redis;
@@ -56,7 +64,9 @@ public class EventConsumer implements SmartLifecycle {
             EventProperties properties,
             TransactionTemplate transactionTemplate,
             ProcessedEventRepository processedEvents,
-            List<DomainEventHandler> handlers) {
+            List<DomainEventHandler> handlers,
+            EventTrace trace) {
+        this.trace = trace;
         this.connectionFactory = connectionFactory;
         this.redis = redis;
         this.objectMapper = objectMapper;
@@ -125,28 +135,47 @@ public class EventConsumer implements SmartLifecycle {
         String type = fields.get("type");
         DomainEventHandler handler = handlersByType.get(type);
         if (handler != null) {
-            EventEnvelope envelope = toEnvelope(fields);
-            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-                try {
-                    transactionTemplate.executeWithoutResult(status -> {
-                        if (processedEvents.existsById(envelope.eventId())) {
-                            return;
-                        }
-                        handler.handle(envelope);
-                        processedEvents.save(new ProcessedEvent(envelope.eventId(), type));
-                    });
-                    break;
-                } catch (Exception e) {
-                    if (attempt == MAX_ATTEMPTS) {
-                        log.error("Evento {} ({}) descartado tras {} intentos: {}",
-                                envelope.eventId(), type, MAX_ATTEMPTS, e.getMessage(), e);
-                    } else {
-                        sleepQuietly(200L * attempt);
+            procesar(handler, toEnvelope(fields), fields);
+        }
+        redis.opsForStream().acknowledge(properties.stream(), properties.group(), record.getId());
+    }
+
+    /**
+     * HT-10: el evento se procesa en un span hijo de la traza que lo publicó (campo traceparent) y con su bookingId
+     * en el MDC (si el payload lo trae), así sus logs llevan traceId, spanId y bookingId.
+     */
+    void procesar(DomainEventHandler handler, EventEnvelope envelope, Map<String, String> fields) {
+        Span span = trace.iniciar(fields, envelope.type());
+        String bookingId = envelope.payload() != null ? envelope.payload().path("bookingId").asText(null) : null;
+        try (Tracer.SpanInScope alcance = trace.enAlcance(span);
+             MDC.MDCCloseable mdc = bookingId != null ? MDC.putCloseable(BOOKING_ID, bookingId) : null) {
+            reintentar(handler, envelope);
+        } finally {
+            span.end();
+        }
+    }
+
+    private void reintentar(DomainEventHandler handler, EventEnvelope envelope) {
+        String type = envelope.type();
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                transactionTemplate.executeWithoutResult(status -> {
+                    if (processedEvents.existsById(envelope.eventId())) {
+                        return;
                     }
+                    handler.handle(envelope);
+                    processedEvents.save(new ProcessedEvent(envelope.eventId(), type));
+                });
+                return;
+            } catch (Exception e) {
+                if (attempt == MAX_ATTEMPTS) {
+                    log.error("Evento {} ({}) descartado tras {} intentos: {}",
+                            envelope.eventId(), type, MAX_ATTEMPTS, e.getMessage(), e);
+                } else {
+                    sleepQuietly(200L * attempt);
                 }
             }
         }
-        redis.opsForStream().acknowledge(properties.stream(), properties.group(), record.getId());
     }
 
     private EventEnvelope toEnvelope(Map<String, String> fields) {

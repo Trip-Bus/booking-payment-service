@@ -461,17 +461,18 @@ class ReportesYComisionIT {
                 .andReturn().getResponse().getContentAsString();
 
         assertThat(csv.split("\n")).containsExactly(
-                "grupo,tiquetes_vendidos,ingresos_brutos,reembolsos,ingresos_netos,comision_tripbus,neto_empresa",
-                "APP,2,180000,60000,120000,12000,108000",
-                "TAQUILLA,1,50000,0,50000,5000,45000",
-                "TOTAL,3,230000,60000,170000,17000,153000");
+                "grupo,tiquetes_vendidos,ingresos_brutos,descuento_cupones,reembolsos,ingresos_netos,comision_tripbus,"
+                        + "neto_empresa",
+                "APP,2,180000,0,60000,120000,12000,108000",
+                "TAQUILLA,1,50000,0,0,50000,5000,45000",
+                "TOTAL,3,230000,0,60000,170000,17000,153000");
 
         when(seatInventory.occupancy(anyList())).thenReturn(List.of());
         String porRuta = mvc.perform(get("/reports/sales.csv").param("desde", "2026-06-01").param("hasta", "2026-06-02")
                         .param("agrupar", "ruta").with(operador(empresa)))
                 .andReturn().getResponse().getContentAsString();
-        assertThat(porRuta).startsWith("grupo,tiquetes_vendidos,ingresos_brutos,reembolsos,ingresos_netos,"
-                + "comision_tripbus,neto_empresa,ocupacion_promedio\n").contains("Bogotá - Cali,1,50000,0,50000,5000,45000,\n");
+        assertThat(porRuta).startsWith("grupo,tiquetes_vendidos,ingresos_brutos,descuento_cupones,reembolsos,ingresos_netos,"
+                + "comision_tripbus,neto_empresa,ocupacion_promedio\n").contains("Bogotá - Cali,1,50000,0,0,50000,5000,45000,\n");
     }
 
     @Test

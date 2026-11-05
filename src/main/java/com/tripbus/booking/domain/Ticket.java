@@ -31,6 +31,13 @@ public class Ticket {
     @Column(nullable = false)
     private String estado;
 
+    /** US-142: tramo del tiquete (copiado de la reserva); null = el viaje completo. */
+    @Column(name = "parada_abordaje")
+    private String paradaAbordaje;
+
+    @Column(name = "parada_bajada")
+    private String paradaBajada;
+
     /** US-033: momento en que el QR se validó al abordar (null mientras no se haya usado). */
     @Column(name = "usado_en")
     private Instant usadoEn;
@@ -77,6 +84,19 @@ public class Ticket {
 
     public Instant getEmitidoEn() {
         return emitidoEn;
+    }
+
+    public void asignarTramo(String paradaAbordaje, String paradaBajada) {
+        this.paradaAbordaje = paradaAbordaje;
+        this.paradaBajada = paradaBajada;
+    }
+
+    public String getParadaAbordaje() {
+        return paradaAbordaje;
+    }
+
+    public String getParadaBajada() {
+        return paradaBajada;
     }
 
     public String getEstado() {

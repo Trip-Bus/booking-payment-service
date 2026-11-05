@@ -59,6 +59,12 @@ management:
   metrics:
     tags:
       application: booking-payment-service
+  # HT-10: trazas con Micrometer Tracing (OpenTelemetry). Se exportan por OTLP solo si OTEL_EXPORTER_OTLP_ENDPOINT
+  # tiene valor (config.ObservabilidadEnvironment); el contexto viaja en los RestClient, en los eventos de Redis
+  # Streams (campo traceparent) y en el webhook de la pasarela simulada.
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING:0.1}
   info:
     env:
       enabled: true
@@ -72,7 +78,18 @@ info:
   app:
     commit: ${APP_COMMIT:local}
 
+# Logs: texto legible por defecto con requestId, bookingId (cuando la petición o el evento es de una reserva),
+# traceId y spanId en cada línea. Con LOG_FORMAT=json se usa ECS (una línea JSON por evento con el MDC; ver
+# config.ObservabilidadEnvironment). Nunca se registran documentos, teléfonos ni correos completos.
+logging:
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}){faint} %clr(%5p) %clr([%X{requestId:-}]){magenta} %clr([%X{bookingId:-}]){yellow} %clr([%X{traceId:-},%X{spanId:-}]){blue} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%wEx"
+
 tripbus:
+  # Swagger del API Gateway: con OPENAPI_SERVER_URL (p. ej. http://localhost:18000) "Try it out" va por el
+  # gateway. Vacío = el servidor desde el que se abre Swagger.
+  openapi:
+    server-url: ${OPENAPI_SERVER_URL:}
   internal-token: ${INTERNAL_API_TOKEN:tripbus_internal_qa_token}
   events:
     enabled: ${EVENTS_ENABLED:true}
