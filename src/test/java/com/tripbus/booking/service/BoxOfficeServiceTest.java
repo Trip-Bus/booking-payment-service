@@ -63,10 +63,12 @@ class BoxOfficeServiceTest {
     void preparar() {
         service = new BoxOfficeService(bookings, mock(PassengerRepository.class), payments, tickets, catalog,
                 seatInventory, identity, paymentService, mock(SagaLogger.class), mock(EventPublisher.class), tx,
-                Clock.fixed(AHORA, ZoneOffset.UTC), commissions);
+                Clock.fixed(AHORA, ZoneOffset.UTC), commissions, new com.tripbus.booking.observabilidad.MetricasBooking(
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                new TarifaService(catalog, mock(com.tripbus.booking.client.FlashOffersClient.class)));
         when(catalog.requireItinerary(itinerario)).thenReturn(new CatalogClient.ItinerarySummary(itinerario, "A", "B",
                 AHORA.plus(Duration.ofHours(2)), null, "E", "P", empresa, "PROGRAMADO"));
-        when(catalog.price(itinerario)).thenReturn(new CatalogClient.Price(itinerario, BigDecimal.TEN, "COP", "PROGRAMADO"));
+        precios("PROGRAMADO");
         when(seatInventory.createHold(eq(itinerario), anyList(), any())).thenReturn(new SeatInventoryClient.Hold(
                 UUID.randomUUID(), itinerario, List.of("1"), operador.userId(), null, null, "ACTIVA", AHORA, 600));
     }
@@ -95,6 +97,16 @@ class BoxOfficeServiceTest {
         verify(seatInventory, never()).createHold(any(), anyList(), any());
     }
 
+    /** Catalog cotiza 10 por pasajero con el estado del viaje. */
+    private void precios(String estado) {
+        org.mockito.Mockito.doAnswer(inv -> {
+            CatalogClient.PricingRequest r = inv.getArgument(0);
+            return new CatalogClient.PricingResult(r.itineraryId(), estado, "COP", null, r.pasajeros().stream()
+                    .map(p -> new CatalogClient.PassengerPrice(p.asiento(), p.tipoPasajero(), "ESTANDAR", BigDecimal.TEN,
+                            BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.TEN)).toList());
+        }).when(catalog).pricing(any());
+    }
+
     @Test
     void sinSalidaOSinPrecioVigenteNoSeVende() {
         when(catalog.requireItinerary(itinerario)).thenReturn(new CatalogClient.ItinerarySummary(itinerario, "A", "B",
@@ -103,7 +115,7 @@ class BoxOfficeServiceTest {
 
         when(catalog.requireItinerary(itinerario)).thenReturn(new CatalogClient.ItinerarySummary(itinerario, "A", "B",
                 AHORA.plus(Duration.ofHours(2)), null, "E", "P", empresa, null));
-        when(catalog.price(itinerario)).thenReturn(new CatalogClient.Price(itinerario, BigDecimal.TEN, "COP", "CANCELADO"));
+        precios("CANCELADO");
         esperar(venta(List.of("1"), 1, null), operador, HttpStatus.CONFLICT, "ITINERARY_NOT_AVAILABLE");
     }
 

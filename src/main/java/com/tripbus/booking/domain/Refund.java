@@ -69,4 +69,12 @@ public class Refund {
     public BigDecimal getComisionValor() {
         return comisionValor;
     }
+
+    public String getMotivo() {
+        return motivo;
+    }
+
+    public Instant getCreadoEn() {
+        return creadoEn;
+    }
 }

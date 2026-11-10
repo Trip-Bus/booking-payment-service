@@ -1,5 +1,6 @@
 package com.tripbus.booking.service;
 
+import com.tripbus.booking.observabilidad.MetricasBooking;
 import com.tripbus.booking.common.redis.LeaderLock;
 import com.tripbus.booking.domain.BookingStatus;
 import com.tripbus.booking.domain.PaymentStatus;
@@ -33,10 +34,13 @@ public class SagaRecoveryJob {
     private final RescheduleSaga rescheduleSaga;
     private final LeaderLock leaderLock;
     private final Clock clock;
+    private final MetricasBooking metricas;
 
+    @SuppressWarnings("java:S107") // dependencias del job de recuperación, inyectadas por Spring
     public SagaRecoveryJob(BookingRepository bookingRepository, PaymentRepository paymentRepository,
                            TicketRepository ticketRepository, PaymentService paymentService,
-                           RescheduleSaga rescheduleSaga, LeaderLock leaderLock, Clock clock) {
+                           RescheduleSaga rescheduleSaga, LeaderLock leaderLock, Clock clock, MetricasBooking metricas) {
+        this.metricas = metricas;
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.ticketRepository = ticketRepository;
@@ -58,17 +62,20 @@ public class SagaRecoveryJob {
                 BookingStatus.PAGO_APROBADO, now.minusSeconds(15))) {
             log.info("Retomando la saga de la reserva {}", bookingId);
             paymentService.confirmAndIssue(bookingId);
+            metricas.sagaRecuperada();
         }
         // Cobros sin respuesta de la pasarela por más de 5 minutos.
         for (UUID paymentId : paymentRepository.findIdsByEstadoAndCreadoEnBefore(
                 PaymentStatus.PENDIENTE, now.minus(Duration.ofMinutes(5)))) {
             log.warn("El pago {} no recibió respuesta de la pasarela; se marca como fallido", paymentId);
             paymentService.failPayment(paymentId, PaymentService.SIN_RESPUESTA);
+            metricas.sagaRecuperada();
         }
         // US-150: reprogramaciones aplicadas cuyos asientos viejos seat-inventory aún no anuló.
         for (UUID bookingId : bookingRepository.findIdsConAnulacionPendiente(now.minusSeconds(15))) {
             log.info("Reintentando anular los asientos de la reserva reprogramada {}", bookingId);
             rescheduleSaga.anularAsientosAnteriores(bookingId);
+            metricas.sagaRecuperada();
         }
     }
 

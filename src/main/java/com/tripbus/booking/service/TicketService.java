@@ -68,8 +68,12 @@ public class TicketService {
             UUID ticketId = UUID.randomUUID();
             String content = content(ticketId, booking);
             String signature = sign(content);
-            return ticketRepository.save(new Ticket(ticketId, booking.getId(), content + "|" + signature, signature,
-                    clock.instant()));
+            Ticket ticket = new Ticket(ticketId, booking.getId(), content + "|" + signature, signature, clock.instant());
+            Booking.Tramo tramo = booking.getTramo();
+            if (tramo != null) {
+                ticket.asignarTramo(tramo.paradaAbordaje(), tramo.paradaBajada());
+            }
+            return ticketRepository.save(ticket);
         });
     }
 
@@ -112,7 +116,8 @@ public class TicketService {
                 it != null ? it.empresa() : null,
                 it != null ? it.placa() : null,
                 booking.getSeatNumbers(), pasajeros, booking.getTotal(), booking.getMoneda(),
-                ticket.getQrCode(), "data:image/png;base64," + Base64.getEncoder().encodeToString(qrPng(ticket.getQrCode())));
+                ticket.getQrCode(), "data:image/png;base64," + Base64.getEncoder().encodeToString(qrPng(ticket.getQrCode())),
+                BookingService.tramo(booking.getTramo()));
     }
 
     @Transactional(readOnly = true)

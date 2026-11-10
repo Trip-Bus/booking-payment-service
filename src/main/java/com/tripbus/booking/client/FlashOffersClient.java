@@ -3,6 +3,7 @@ package com.tripbus.booking.client;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.config.BookingProperties;
 import com.tripbus.booking.config.RequestIdPropagationInterceptor;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -18,13 +19,21 @@ public class FlashOffersClient {
 
     private final RestClient restClient;
 
-    public FlashOffersClient(BookingProperties properties, @Value("${tripbus.internal-token}") String token) {
+    public FlashOffersClient(BookingProperties properties, String token) {
+        this(properties, token, ObservationRegistry.NOOP);
+    }
+
+    /** HT-10: con el ObservationRegistry de Spring cada llamada es un span y lleva el traceparent. */
+    @org.springframework.beans.factory.annotation.Autowired
+    public FlashOffersClient(BookingProperties properties, @Value("${tripbus.internal-token}") String token,
+                             ObservationRegistry observations) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(1000);
         factory.setReadTimeout(3000);
         this.restClient = RestClient.builder()
                 .baseUrl(properties.flashOffersUrl())
                 .requestFactory(factory)
+                .observationRegistry(observations)
                 .defaultHeader("X-Internal-Token", token)
                 .requestInterceptor(new RequestIdPropagationInterceptor())
                 .build();

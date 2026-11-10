@@ -3,6 +3,7 @@ package com.tripbus.booking.client;
 import com.tripbus.booking.config.RequestIdPropagationInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -25,14 +26,21 @@ public class IdentityClient {
 
     private final RestClient restClient;
 
+    public IdentityClient(String identityUrl, String token) {
+        this(identityUrl, token, ObservationRegistry.NOOP);
+    }
+
+    /** HT-10: con el ObservationRegistry de Spring cada llamada es un span y lleva el traceparent. */
+    @org.springframework.beans.factory.annotation.Autowired
     public IdentityClient(@Value("${tripbus.booking.identity-url}") String identityUrl,
-                          @Value("${tripbus.internal-token}") String token) {
+                          @Value("${tripbus.internal-token}") String token, ObservationRegistry observations) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(500);
         factory.setReadTimeout(1500);
         this.restClient = RestClient.builder()
                 .baseUrl(identityUrl)
                 .requestFactory(factory)
+                .observationRegistry(observations)
                 .defaultHeader("X-Internal-Token", token)
                 .requestInterceptor(new RequestIdPropagationInterceptor())
                 .build();

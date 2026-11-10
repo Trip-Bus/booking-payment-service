@@ -39,16 +39,17 @@ class ReportControllerTest {
     @Test
     void csvDeVentasConOcupacionConDosDecimalesOVacia() {
         SalesReportResponse r = new SalesReportResponse(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 2), "ruta",
-                null, List.of(new SalesReportRow("A - B", 1, 10, 0, 10, 1, 9, 62.5),
-                new SalesReportRow("C - D", 2, 20, 5, 15, 2, 13, null)),
-                new SalesReportRow("TOTAL", 3, 30, 5, 25, 3, 22, null), 0);
+                null, List.of(new SalesReportRow("A - B", 1, 10, 2, 0, 10, 1, 9, 62.5),
+                new SalesReportRow("C - D", 2, 20, 0, 5, 15, 2, 13, null)),
+                new SalesReportRow("TOTAL", 3, 30, 2, 5, 25, 3, 22, null), 0);
 
         assertThat(ReportController.salesCsv(r).split("\n")).containsExactly(
-                "grupo,tiquetes_vendidos,ingresos_brutos,reembolsos,ingresos_netos,comision_tripbus,neto_empresa,"
+                "grupo,tiquetes_vendidos,ingresos_brutos,descuento_cupones,reembolsos,ingresos_netos,comision_tripbus,"
+                        + "neto_empresa,"
                         + "ocupacion_promedio",
-                "A - B,1,10,0,10,1,9,62.50",
-                "C - D,2,20,5,15,2,13,",
-                "TOTAL,3,30,5,25,3,22,");
+                "A - B,1,10,2,0,10,1,9,62.50",
+                "C - D,2,20,0,5,15,2,13,",
+                "TOTAL,3,30,2,5,25,3,22,");
     }
 
     @Test

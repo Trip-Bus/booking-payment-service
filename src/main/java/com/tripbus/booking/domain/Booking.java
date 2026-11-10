@@ -9,6 +9,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -95,6 +96,36 @@ public class Booking {
     @Column(name = "valor_pagado")
     private BigDecimal valorPagado;
 
+    /** US-138/US-141: suma del desglose por pasajero que dio catalog (antes del cupón). */
+    @Column(name = "subtotal")
+    private BigDecimal subtotal;
+
+    /** US-147: descuento del cupón aplicado (0 sin cupón). total = subtotal - descuentoCupon. */
+    @Column(name = "descuento_cupon", nullable = false)
+    private BigDecimal descuentoCupon = BigDecimal.ZERO;
+
+    @Column(name = "coupon_id")
+    private UUID couponId;
+
+    @Column(name = "cupon_codigo")
+    private String cuponCodigo;
+
+    @Column(name = "route_id")
+    private UUID routeId;
+
+    /** US-142: tramo comprado (orden y nombre de las paradas); null = el viaje completo. */
+    @Column(name = "from_orden")
+    private Integer fromOrden;
+
+    @Column(name = "to_orden")
+    private Integer toOrden;
+
+    @Column(name = "parada_abordaje")
+    private String paradaAbordaje;
+
+    @Column(name = "parada_bajada")
+    private String paradaBajada;
+
     /** US-150: en una reserva REPROGRAMADA, cuándo quedó resuelta la anulación de sus asientos viejos. */
     @Column(name = "anulacion_resuelta_en")
     private Instant anulacionResueltaEn;
@@ -130,6 +161,10 @@ public class Booking {
 
     @Column(name = "comprador_telefono")
     private String compradorTelefono;
+
+    /** US-131: cuándo se borraron los datos de contacto porque el usuario eliminó su cuenta; null si no. */
+    @Column(name = "usuario_eliminado_en")
+    private Instant usuarioEliminadoEn;
 
     @Column(name = "creado_en", nullable = false)
     private Instant creadoEn;
@@ -228,6 +263,71 @@ public class Booking {
     }
 
     /** US-145: copia los datos del viaje (los null no reemplazan lo que ya había). */
+    /** US-142: tramo comprado. */
+    public record Tramo(Integer fromOrden, String paradaAbordaje, Integer toOrden, String paradaBajada) {
+    }
+
+    /**
+     * US-138/US-141 y US-147: precio de la compra. subtotal es la suma del desglose por pasajero; total = subtotal -
+     * descuento del cupón (nunca negativo) y precioUnitario el promedio por asiento.
+     */
+    public void asignarTarifa(BigDecimal subtotal, BigDecimal descuentoCupon, UUID couponId, String cuponCodigo) {
+        BigDecimal descuento = descuentoCupon == null ? BigDecimal.ZERO : descuentoCupon.min(subtotal);
+        this.subtotal = subtotal;
+        this.descuentoCupon = descuento;
+        this.couponId = couponId;
+        this.cuponCodigo = cuponCodigo;
+        this.total = subtotal.subtract(descuento);
+        this.precioUnitario = subtotal.divide(BigDecimal.valueOf(getSeatNumbers().size()), 2, RoundingMode.HALF_UP);
+    }
+
+    /** US-150: en una reprogramación el subtotal es el pasaje nuevo; total es la diferencia que se cobra. */
+    public void asignarSubtotal(BigDecimal subtotal) {
+        this.subtotal = subtotal;
+    }
+
+    public void asignarTramo(Tramo tramo) {
+        if (tramo == null) {
+            return;
+        }
+        fromOrden = tramo.fromOrden();
+        toOrden = tramo.toOrden();
+        paradaAbordaje = tramo.paradaAbordaje();
+        paradaBajada = tramo.paradaBajada();
+    }
+
+    public void asignarRuta(UUID routeId) {
+        this.routeId = routeId;
+    }
+
+    /** Tramo de la reserva, o null si es el viaje completo. */
+    public Tramo getTramo() {
+        if (fromOrden == null && toOrden == null && paradaAbordaje == null && paradaBajada == null) {
+            return null;
+        }
+        return new Tramo(fromOrden, paradaAbordaje, toOrden, paradaBajada);
+    }
+
+    public BigDecimal getSubtotal() {
+        return subtotal;
+    }
+
+    public BigDecimal getDescuentoCupon() {
+        return descuentoCupon;
+    }
+
+    public UUID getCouponId() {
+        return couponId;
+    }
+
+    public String getCuponCodigo() {
+        return cuponCodigo;
+    }
+
+    public UUID getRouteId() {
+        return routeId;
+    }
+
     public void asignarViaje(Viaje viaje) {
         if (viaje == null) {
             return;
@@ -368,6 +468,10 @@ public class Booking {
 
     public String getCompradorTelefono() {
         return compradorTelefono;
+    }
+
+    public Instant getUsuarioEliminadoEn() {
+        return usuarioEliminadoEn;
     }
 
     public Instant getCreadoEn() {

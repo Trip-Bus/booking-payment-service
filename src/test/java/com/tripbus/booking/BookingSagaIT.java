@@ -9,6 +9,7 @@ import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.payment.PaymentGateway;
 import com.tripbus.booking.payment.WebhookSigner;
 import com.tripbus.booking.repository.TicketRepository;
+import com.tripbus.booking.observabilidad.MetricasBooking;
 import com.tripbus.booking.service.CommissionService;
 import com.tripbus.booking.service.PaymentService;
 import com.tripbus.booking.repository.WebhookLogRepository;
@@ -83,6 +84,13 @@ class BookingSagaIT {
     @Autowired
     private MockMvc mvc;
     @Autowired
+    private io.micrometer.core.instrument.MeterRegistry meters;
+
+    private double contador(String nombre, String tag, String valor) {
+        var c = meters.find(nombre).tag(tag, valor).counters();
+        return c.stream().mapToDouble(io.micrometer.core.instrument.Counter::count).sum();
+    }
+    @Autowired
     private ObjectMapper objectMapper;
     @Autowired
     private WebhookSigner signer;
@@ -111,6 +119,7 @@ class BookingSagaIT {
     @BeforeEach
     void simularServicios() {
         reset(seatInventory, catalog, gateway);
+        com.tripbus.booking.support.PreciosDePrueba.desdePrecioBase(catalog);
         when(catalog.price(itineraryId)).thenReturn(
                 new CatalogClient.Price(itineraryId, new BigDecimal("95000"), "COP", "PROGRAMADO"));
         when(catalog.itinerary(itineraryId)).thenReturn(new CatalogClient.ItinerarySummary(itineraryId, "Bogotá",
@@ -172,6 +181,9 @@ class BookingSagaIT {
 
     @Test
     void compraCompletaConReintentosYWebhookDuplicadoEmiteUnSoloTiquete() throws Exception {
+        double pagosAntes = contador(MetricasBooking.PAGOS, "resultado", MetricasBooking.APROBADO);
+        double tiquetesAntes = contador(MetricasBooking.TIQUETES, "canal", "APP");
+        long tiemposAntes = meters.timer(MetricasBooking.PAGO_HASTA_TIQUETE).count();
         UUID holdId = nuevaRetencion();
         UUID bookingId = UUID.fromString(crearReserva(holdId).get("bookingId").asText());
 
@@ -205,6 +217,10 @@ class BookingSagaIT {
                 List.of("12"), userId, null, bookingId, "CONFIRMADA", Instant.now(), 0));
         webhook(paymentId, "APPROVED");
         webhook(paymentId, "APPROVED"); // la pasarela reintenta el webhook
+        // HT-10: el webhook repetido no vuelve a contar el pago ni el tiquete.
+        assertThat(contador(MetricasBooking.PAGOS, "resultado", MetricasBooking.APROBADO)).isEqualTo(pagosAntes + 1);
+        assertThat(contador(MetricasBooking.TIQUETES, "canal", "APP")).isEqualTo(tiquetesAntes + 1);
+        assertThat(meters.timer(MetricasBooking.PAGO_HASTA_TIQUETE).count()).isEqualTo(tiemposAntes + 1);
 
         verify(seatInventory, times(1)).confirmSale(holdId, bookingId);
         String booking = mvc.perform(get("/bookings/{id}", bookingId).with(pasajero()))
@@ -254,6 +270,7 @@ class BookingSagaIT {
 
     @Test
     void siElAsientoSePerdioDespuesDelPagoSeReembolsa() throws Exception {
+        double reembolsosAntes = contador(MetricasBooking.REEMBOLSOS, "causa", "asiento_no_confirmado");
         UUID holdId = nuevaRetencion();
         UUID bookingId = UUID.fromString(crearReserva(holdId).get("bookingId").asText());
         String paymentId = objectMapper.readTree(pagar(bookingId, "pago-tardio-0001", "tok_visa_approved"))
@@ -264,6 +281,7 @@ class BookingSagaIT {
         mvc.perform(get("/bookings/{id}", bookingId).with(pasajero()))
                 .andExpect(jsonPath("$.estado").value("REEMBOLSADA"))
                 .andExpect(jsonPath("$.pago.estado").value("REEMBOLSADO"));
+        assertThat(contador(MetricasBooking.REEMBOLSOS, "causa", "asiento_no_confirmado")).isEqualTo(reembolsosAntes + 1);
     }
 
     @Test

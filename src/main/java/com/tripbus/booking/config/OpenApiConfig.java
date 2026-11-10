@@ -5,10 +5,15 @@ import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.oas.models.servers.Server;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.info.BuildProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.util.StringUtils;
+
+import java.util.List;
 
 /**
  * Documentación OpenAPI / Swagger UI (http://localhost:18004/swagger-ui.html). Solo en IDE y QA:
@@ -21,10 +26,11 @@ public class OpenApiConfig {
     private static final String BEARER = "bearer-jwt";
 
     @Bean
-    public OpenAPI bookingOpenApi(ObjectProvider<BuildProperties> buildProperties) {
+    public OpenAPI bookingOpenApi(ObjectProvider<BuildProperties> buildProperties,
+                                  @Value("${tripbus.openapi.server-url:}") String serverUrl) {
         BuildProperties build = buildProperties.getIfAvailable();
         String version = build != null ? build.getVersion() : "dev";
-        return new OpenAPI()
+        OpenAPI openApi = new OpenAPI()
                 .info(new Info()
                         .title("TripBus · Booking & Payment")
                         .description("Reservas, pago con tarjeta (sandbox), tiquetes con QR, idempotencia y saga de compra.")
@@ -34,5 +40,10 @@ public class OpenApiConfig {
                         .scheme("bearer")
                         .bearerFormat("JWT")))
                 .addSecurityItem(new SecurityRequirement().addList(BEARER));
+        // Con OPENAPI_SERVER_URL (p. ej. el API Gateway) "Try it out" prueba a través de ese servidor.
+        if (StringUtils.hasText(serverUrl)) {
+            openApi.servers(List.of(new Server().url(serverUrl.trim())));
+        }
+        return openApi;
     }
 }

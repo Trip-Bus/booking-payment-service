@@ -5,6 +5,11 @@ import com.tripbus.booking.config.PaymentProperties;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.tracing.CurrentTraceContext;
+import io.micrometer.tracing.Tracer;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -41,14 +46,34 @@ public class SandboxPaymentGateway implements PaymentGateway {
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private final Map<String, Map<String, Object>> pendingPse = new ConcurrentHashMap<>();
 
+    /** HT-10: el webhook sale en otro hilo; con este contexto sigue en la misma traza que el cobro. */
+    private final CurrentTraceContext traceContext;
+
     public SandboxPaymentGateway(PaymentProperties properties, WebhookSigner signer, ObjectMapper objectMapper) {
+        this(properties, signer, objectMapper, ObservationRegistry.NOOP, Tracer.NOOP);
+    }
+
+    @Autowired
+    public SandboxPaymentGateway(PaymentProperties properties, WebhookSigner signer, ObjectMapper objectMapper,
+                                 ObservationRegistry observations, ObjectProvider<Tracer> tracer) {
+        this(properties, signer, objectMapper, observations, tracer.getIfAvailable(() -> Tracer.NOOP));
+    }
+
+    SandboxPaymentGateway(PaymentProperties properties, WebhookSigner signer, ObjectMapper objectMapper,
+                          ObservationRegistry observations, Tracer tracer) {
         this.properties = properties;
         this.signer = signer;
         this.objectMapper = objectMapper;
+        this.traceContext = tracer.currentTraceContext();
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(2000);
         factory.setReadTimeout(10000);
-        this.restClient = RestClient.builder().requestFactory(factory).build();
+        this.restClient = RestClient.builder().requestFactory(factory).observationRegistry(observations).build();
+    }
+
+    /** Programa una tarea conservando la traza actual (el webhook lleva el traceparent del cobro). */
+    private void programar(Runnable tarea, long delayMs) {
+        scheduler.schedule(traceContext.wrap(tarea), delayMs, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -69,7 +94,7 @@ public class SandboxPaymentGateway implements PaymentGateway {
 
         if ("PSE".equals(method)) {
             pendingPse.put(gatewayId, event);
-            scheduler.schedule(() -> completePse(gatewayId, false), properties.pseTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            programar(() -> completePse(gatewayId, false), properties.pseTimeout().toMillis());
             return new ChargeResult(gatewayId, "/sandbox/pse/" + gatewayId);
         }
         if ("NEQUI".equals(method)) {
@@ -79,9 +104,9 @@ public class SandboxPaymentGateway implements PaymentGateway {
                     ("3991111111".equals(phone) ? null : "ERROR_NEQUI"));
         }
         long delay = "NEQUI".equals(method) ? properties.nequiDelay().toMillis() : properties.webhookDelay().toMillis();
-        scheduler.schedule(() -> sendWebhook(event), delay, TimeUnit.MILLISECONDS);
+        programar(() -> sendWebhook(event), delay);
         if (properties.duplicateWebhook()) {
-            scheduler.schedule(() -> sendWebhook(event), delay + 800, TimeUnit.MILLISECONDS);
+            programar(() -> sendWebhook(event), delay + 800);
         }
         log.info("[sandbox] cobro {} por {} {} -> {}", gatewayId, amount, currency, event.get("status"));
         return new ChargeResult(gatewayId, null);
@@ -95,7 +120,7 @@ public class SandboxPaymentGateway implements PaymentGateway {
         event.put("reason", approved ? null : "PSE_RECHAZADO_O_VENCIDO");
         sendWebhook(event);
         if (properties.duplicateWebhook()) {
-            scheduler.schedule(() -> sendWebhook(event), 800, TimeUnit.MILLISECONDS);
+            programar(() -> sendWebhook(event), 800);
         }
         return true;
     }

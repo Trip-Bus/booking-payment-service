@@ -24,10 +24,12 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
+import java.text.Normalizer;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -69,6 +71,7 @@ public class RescheduleService {
     private final FlashOffersClient flashOffers;
     private final NoShowProperties noShow;
     private final Clock clock;
+    private final TarifaService tarifas;
 
     @SuppressWarnings("java:S107") // dependencias del flujo de reprogramación, inyectadas por Spring
     public RescheduleService(BookingRepository bookingRepository, PassengerRepository passengerRepository,
@@ -76,7 +79,8 @@ public class RescheduleService {
                              CatalogClient catalog, FlashOffersClient flashOffers, BookingService bookingService,
                              PaymentService paymentService, SagaLogger saga, EventPublisher events,
                              TransactionTemplate tx, BookingProperties properties, NoShowProperties noShow,
-                             Clock clock) {
+                             Clock clock, TarifaService tarifas) {
+        this.tarifas = tarifas;
         this.flashOffers = flashOffers;
         this.noShow = noShow;
         this.bookingRepository = bookingRepository;
@@ -127,11 +131,14 @@ public class RescheduleService {
         SeatInventoryClient.Hold hold = validarRetencion(origen, holdId, pasajeros.size());
         CatalogClient.ItinerarySummary viajeNuevo = validarViajeNuevo(validado.viaje(), origen, hold, modo);
 
-        BookingService.Precio precio = bookingService.precio(hold, origen.getUserId());
-        if (!origen.getMoneda().equalsIgnoreCase(precio.moneda())) {
+        // US-138/US-141: el mismo cálculo de catalog que una compra, con los tipos de pasajero de la reserva original.
+        TarifaService.Tarifa tarifa = tarifas.calcular(hold,
+                pasajeros.stream().map(Passenger::getTipoPasajero).toList(), origen.getUserId());
+        if (!origen.getMoneda().equalsIgnoreCase(tarifa.moneda())) {
             throw ApiException.conflict("CURRENCY_MISMATCH", "El viaje nuevo se vende en otra moneda");
         }
-        BigDecimal pasajeNuevo = precio.unitario().multiply(BigDecimal.valueOf(hold.seatNumbers().size()));
+        validarMismoTramo(origen, tarifa.tramo(), viajeNuevo);
+        BigDecimal pasajeNuevo = tarifa.subtotal();
         BigDecimal cargo = validado.noShow()
                 ? properties.rescheduleFee().add(cargoNoShow(origen.getValorPagado(), noShow.noShowFeePercent()))
                 : properties.rescheduleFee();
@@ -139,7 +146,7 @@ public class RescheduleService {
                 : diferencia(pasajeNuevo, origen.getValorPagado(), cargo);
         BigDecimal valorPagado = pasajeNuevo.max(origen.getValorPagado());
         String email = emailContacto != null ? emailContacto : origen.getEmailContacto();
-        Nueva datos = new Nueva(hold, pasajeros, precio.unitario(), diferencia, valorPagado, email,
+        Nueva datos = new Nueva(hold, pasajeros, tarifa, diferencia, valorPagado, email,
                 BookingService.viajeDe(viajeNuevo));
 
         Booking nueva;
@@ -160,6 +167,32 @@ public class RescheduleService {
         return new BookingService.CreateResult(bookingService.get(nueva.getId(), viewer), true);
     }
 
+    /**
+     * US-142: reprogramar un tramo exige el mismo origen y destino del tramo. Se comparan la parada de abordaje y la de
+     * bajada (las del tramo, o las del viaje completo si no es un tramo), sin distinguir mayúsculas ni tildes; si
+     * alguna no se conoce (catalog no la dio) no se puede comparar y se deja pasar.
+     */
+    static void validarMismoTramo(Booking origen, Booking.Tramo tramoNuevo, CatalogClient.ItinerarySummary viajeNuevo) {
+        Booking.Tramo tramoOrigen = origen.getTramo();
+        String subeAntes = tramoOrigen != null ? tramoOrigen.paradaAbordaje() : origen.getOrigen();
+        String bajaAntes = tramoOrigen != null ? tramoOrigen.paradaBajada() : origen.getDestino();
+        String subeAhora = tramoNuevo != null ? tramoNuevo.paradaAbordaje() : viajeNuevo.origen();
+        String bajaAhora = tramoNuevo != null ? tramoNuevo.paradaBajada() : viajeNuevo.destino();
+        if (distinta(subeAntes, subeAhora) || distinta(bajaAntes, bajaAhora)) {
+            throw new ApiException(HttpStatus.CONFLICT, "SEGMENT_MISMATCH",
+                    "Solo se puede reprogramar a un viaje con la misma parada de abordaje y de bajada",
+                    Map.of("paradaAbordaje", String.valueOf(subeAntes), "paradaBajada", String.valueOf(bajaAntes)));
+        }
+    }
+
+    private static boolean distinta(String a, String b) {
+        return a != null && b != null && !sinTildes(a).equals(sinTildes(b));
+    }
+
+    static String sinTildes(String valor) {
+        return Normalizer.normalize(valor.trim(), Normalizer.Form.NFD).replaceAll("\\p{M}", "").toLowerCase(Locale.ROOT);
+    }
+
     /** Lo que se cobra: la diferencia del pasaje (nunca negativa: sin reembolso) más el cargo fijo. */
     static BigDecimal diferencia(BigDecimal pasajeNuevo, BigDecimal yaPagado, BigDecimal cargo) {
         return pasajeNuevo.subtract(yaPagado).max(BigDecimal.ZERO).add(cargo);
@@ -175,7 +208,7 @@ public class RescheduleService {
     }
 
     /** Lo que se guarda en la reserva nueva. */
-    private record Nueva(SeatInventoryClient.Hold hold, List<Passenger> pasajeros, BigDecimal precioUnitario,
+    private record Nueva(SeatInventoryClient.Hold hold, List<Passenger> pasajeros, TarifaService.Tarifa tarifa,
                          BigDecimal diferencia, BigDecimal valorPagado, String email, Booking.Viaje viaje) {
     }
 
@@ -356,13 +389,18 @@ public class RescheduleService {
         Booking reprogramada = Booking.reprogramacion(origen,
                 new Booking.SeatSelection(hold.holdId(), hold.itineraryId(), hold.offerId(), hold.seatNumbers(),
                         hold.expiraEn()),
-                datos.precioUnitario(), datos.diferencia(), datos.valorPagado(), datos.email(), now);
+                datos.tarifa().subtotal().divide(BigDecimal.valueOf(hold.seatNumbers().size()), 2, RoundingMode.HALF_UP),
+                datos.diferencia(), datos.valorPagado(), datos.email(), now);
+        reprogramada.asignarSubtotal(datos.tarifa().subtotal());
+        reprogramada.asignarTramo(datos.tarifa().tramo());
         reprogramada.asignarViaje(datos.viaje());
         Booking nueva = bookingRepository.save(reprogramada);
         for (int i = 0; i < pasajeros.size(); i++) {
             Passenger p = pasajeros.get(i);
-            passengerRepository.save(new Passenger(nueva.getId(), p.getNombre(), p.getTipoDocumento(),
-                    p.getNumeroDocumento(), hold.seatNumbers().get(i)));
+            Passenger copia = new Passenger(nueva.getId(), p.getNombre(), p.getTipoDocumento(), p.getNumeroDocumento(),
+                    hold.seatNumbers().get(i));
+            datos.tarifa().pasajeros().get(i).aplicarA(copia);
+            passengerRepository.save(copia);
         }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("bookingId", nueva.getId());

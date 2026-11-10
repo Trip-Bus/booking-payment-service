@@ -1,5 +1,6 @@
 package com.tripbus.booking.service;
 
+import com.tripbus.booking.observabilidad.MetricasBooking;
 import com.tripbus.booking.client.CatalogClient;
 import com.tripbus.booking.client.IdentityClient;
 import com.tripbus.booking.client.SeatInventoryClient;
@@ -68,6 +69,8 @@ public class BoxOfficeService {
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final MetricasBooking metricas;
+    private final TarifaService tarifas;
     private final CommissionService commissions;
 
     @SuppressWarnings("java:S107") // dependencias de la venta en taquilla, inyectadas por Spring
@@ -75,7 +78,10 @@ public class BoxOfficeService {
                             PaymentRepository paymentRepository, TicketRepository ticketRepository,
                             CatalogClient catalog, SeatInventoryClient seatInventory, IdentityClient identity,
                             PaymentService paymentService, SagaLogger saga, EventPublisher events,
-                            TransactionTemplate tx, Clock clock, CommissionService commissions) {
+                            TransactionTemplate tx, Clock clock, CommissionService commissions, MetricasBooking metricas,
+                            TarifaService tarifas) {
+        this.tarifas = tarifas;
+        this.metricas = metricas;
         this.commissions = commissions;
         this.bookingRepository = bookingRepository;
         this.passengerRepository = passengerRepository;
@@ -102,10 +108,9 @@ public class BoxOfficeService {
                     "Debe registrar un pasajero por cada asiento (" + asientos.size() + ")");
         }
         CatalogClient.ItinerarySummary viaje = viajeVendible(request.itineraryId(), operador);
-        CatalogClient.Price precio = catalog.price(request.itineraryId());
-        if (!"PROGRAMADO".equals(precio.estado())) {
-            throw ApiException.conflict("ITINERARY_NOT_AVAILABLE", "El viaje ya no está disponible");
-        }
+        // US-138/US-141: el mismo cálculo de catalog que la app (sin oferta y por el viaje completo).
+        TarifaService.Tarifa precio = tarifas.calcular(request.itineraryId(), asientos,
+                request.pasajeros().stream().map(p -> TarifaService.tipo(p.tipoPasajero())).toList());
         String email = normalizar(request.comprador().email());
         UUID registrado = email == null ? null : identity.passengerIdByEmail(email).orElse(null);
         UUID duenio = registrado != null ? registrado : operador.userId();
@@ -146,7 +151,7 @@ public class BoxOfficeService {
     }
 
     private record Venta(BoxOfficeSaleRequest request, SeatInventoryClient.Hold hold,
-                         CatalogClient.ItinerarySummary viaje, CatalogClient.Price precio, UUID duenio,
+                         CatalogClient.ItinerarySummary viaje, TarifaService.Tarifa precio, UUID duenio,
                          Booking.VentaTaquilla datos, String claveDePago) {
     }
 
@@ -155,15 +160,19 @@ public class BoxOfficeService {
         Instant now = clock.instant();
         SeatInventoryClient.Hold hold = v.hold();
         Booking nueva = Booking.taquilla(new Booking.SeatSelection(hold.holdId(), v.request().itineraryId(), null,
-                        hold.seatNumbers(), hold.expiraEn()), v.duenio(), v.datos(), v.precio().precioBase(),
+                        hold.seatNumbers(), hold.expiraEn()), v.duenio(), v.datos(), v.precio().subtotal(),
                 v.precio().moneda(), v.viaje().companyId(), now);
+        nueva.asignarTarifa(v.precio().subtotal(), null, null, null);
+        nueva.asignarRuta(v.viaje().routeId());
         nueva.asignarViaje(BookingService.viajeDe(v.viaje()));
         // save() hace merge (el id ya viene asignado): se sigue con la instancia administrada que devuelve.
         Booking booking = bookingRepository.save(nueva);
         for (int i = 0; i < v.request().pasajeros().size(); i++) {
             PassengerRequest p = v.request().pasajeros().get(i);
-            passengerRepository.save(new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
-                    p.numeroDocumento().trim(), hold.seatNumbers().get(i)));
+            Passenger pasajero = new Passenger(booking.getId(), p.nombre().trim(), p.tipoDocumento(),
+                    p.numeroDocumento().trim(), hold.seatNumbers().get(i));
+            v.precio().pasajeros().get(i).aplicarA(pasajero);
+            passengerRepository.save(pasajero);
         }
         Map<String, Object> creada = new LinkedHashMap<>();
         creada.put("bookingId", booking.getId());
@@ -179,6 +188,7 @@ public class BoxOfficeService {
 
         booking.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, now);
         Payment pago = paymentRepository.save(Payment.efectivo(booking.getId(), booking.getTotal(), v.claveDePago(), now));
+        metricas.despuesDelCommit(() -> metricas.pago(Payment.EFECTIVO, MetricasBooking.APROBADO));
         booking.cambiarEstado(BookingStatus.PAGO_APROBADO, now);
         Map<String, Object> aprobado = new LinkedHashMap<>();
         aprobado.put("bookingId", booking.getId());

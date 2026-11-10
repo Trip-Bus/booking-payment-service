@@ -6,6 +6,8 @@ import com.tripbus.booking.client.RemoteErrors;
 import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.common.events.EventPublisher;
+import com.tripbus.booking.config.BookingMdc;
+import com.tripbus.booking.observabilidad.MetricasBooking;
 import com.tripbus.booking.domain.Booking;
 import com.tripbus.booking.domain.BookingStatus;
 import com.tripbus.booking.domain.Payment;
@@ -30,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -68,6 +71,8 @@ public class PaymentService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final CommissionService commissions;
+    private final MetricasBooking metricas;
+    private final CouponService coupons;
 
     @SuppressWarnings("java:S107") // dependencias de la saga de compra, inyectadas por Spring
     public PaymentService(BookingRepository bookingRepository, PaymentRepository paymentRepository,
@@ -75,7 +80,10 @@ public class PaymentService {
                           SeatInventoryClient seatInventory, PaymentGateway gateway, WebhookSigner signer,
                           TicketService ticketService, TicketMailService ticketMail, RescheduleSaga rescheduleSaga,
                           SagaLogger saga, EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper,
-                          Clock clock, CommissionService commissions) {
+                          Clock clock, CommissionService commissions, MetricasBooking metricas,
+                          CouponService coupons) {
+        this.coupons = coupons;
+        this.metricas = metricas;
         this.commissions = commissions;
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
@@ -120,6 +128,7 @@ public class PaymentService {
             tx.executeWithoutResult(s -> bookingRepository.lockById(bookingId).ifPresent(b -> {
                 if (b.getEstado() == BookingStatus.PENDIENTE_PAGO) {
                     b.cambiarEstado(BookingStatus.EXPIRADA, clock.instant());
+                    coupons.liberar(b.getId());
                     saga.log(b.getId(), "RETENCION_EXPIRADA", "OK", Map.of("holdId", b.getHoldId()));
                 }
             }));
@@ -220,7 +229,7 @@ public class PaymentService {
     /** US-150: la reserva original ya no está CONFIRMADA con su tiquete EMITIDO al confirmar la nueva. */
     static final String REPROGRAMACION_NO_APLICABLE = "REPROGRAMACION_NO_APLICABLE";
 
-    private record WebhookResult(WebhookOutcome outcome, UUID bookingId) {
+    private record WebhookResult(WebhookOutcome outcome, UUID bookingId, String metodo) {
     }
 
     /** US-034: el webhook es idempotente y tolerante a reintentos de la pasarela. */
@@ -248,7 +257,7 @@ public class PaymentService {
             try {
                 paymentId = UUID.fromString(reference);
             } catch (IllegalArgumentException e) {
-                return new WebhookResult(WebhookOutcome.IGNORADO, null);
+                return new WebhookResult(WebhookOutcome.IGNORADO, null, null);
             }
             Payment payment = paymentRepository.lockById(paymentId).orElse(null);
             boolean otroCobro = payment != null && payment.getPaymentGatewayId() != null && gatewayId != null
@@ -277,6 +286,7 @@ public class PaymentService {
                             event.path("currency").asText(""), payment.getMonto(), booking.getMoneda());
                     payment.rechazar(MONTO_INCORRECTO, now);
                     booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+                    coupons.liberar(booking.getId());
                     publishPaymentFailed(booking, MONTO_INCORRECTO);
                     outcome = WebhookOutcome.MONTO_INCORRECTO;
                 } else if ("APPROVED".equals(status)) {
@@ -295,23 +305,42 @@ public class PaymentService {
                     String motivo = reason != null ? reason : "RECHAZADO_POR_PASARELA";
                     payment.rechazar(motivo, now);
                     booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+                    coupons.liberar(booking.getId());
                     publishPaymentFailed(booking, motivo);
                     outcome = WebhookOutcome.RECHAZADO;
                 }
             }
             webhookLogRepository.save(new WebhookLog(eventId, rawBody, signature, true, outcome.name(), clock.instant()));
-            return new WebhookResult(outcome, bookingId);
+            return new WebhookResult(outcome, bookingId, payment != null ? payment.getMetodo() : null);
         });
 
         WebhookOutcome outcome = Objects.requireNonNull(result).outcome();
         UUID bookingId = result.bookingId();
-        if (outcome == WebhookOutcome.APROBADO) {
-            confirmAndIssue(bookingId);
-        } else if (outcome == WebhookOutcome.RECHAZADO || outcome == WebhookOutcome.MONTO_INCORRECTO) {
-            String motivo = outcome == WebhookOutcome.RECHAZADO ? "PAGO_RECHAZADO" : MONTO_INCORRECTO;
-            bookingRepository.findById(bookingId).ifPresent(b -> releaseHoldQuietly(b.getHoldId(), motivo));
+        contarPago(result);
+        try (BookingMdc mdc = BookingMdc.con(bookingId)) {
+            log.info("Webhook de la pasarela procesado: {}", outcome);
+            if (outcome == WebhookOutcome.APROBADO) {
+                confirmAndIssue(bookingId);
+            } else if (outcome == WebhookOutcome.RECHAZADO || outcome == WebhookOutcome.MONTO_INCORRECTO) {
+                String motivo = outcome == WebhookOutcome.RECHAZADO ? "PAGO_RECHAZADO" : MONTO_INCORRECTO;
+                bookingRepository.findById(bookingId).ifPresent(b -> releaseHoldQuietly(b.getHoldId(), motivo));
+            }
         }
         return outcome;
+    }
+
+    /** HT-10: tripbus_pagos_total; los webhooks duplicados o ajenos no cuentan (el cobro ya se contó). */
+    private void contarPago(WebhookResult result) {
+        String resultado = switch (result.outcome()) {
+            case APROBADO -> MetricasBooking.APROBADO;
+            case RECHAZADO -> MetricasBooking.RECHAZADO;
+            case MONTO_INCORRECTO -> MetricasBooking.MONTO_INCORRECTO;
+            case APROBADO_TARDIO_REEMBOLSADO -> MetricasBooking.APROBADO_TARDIO;
+            case DUPLICADO, IGNORADO -> null;
+        };
+        if (resultado != null) {
+            metricas.pago(result.metodo(), resultado);
+        }
     }
 
     /**
@@ -344,6 +373,7 @@ public class PaymentService {
         // US-190: la pasarela sí cobró, así que cuenta como venta (aprobado_en) y su reembolso revierte la comisión.
         payment.aprobar(now);
         Refund refund = refundRepository.save(Refund.de(payment, monto, "APROBADO_TARDIO", now));
+        metricas.despuesDelCommit(() -> metricas.reembolso("APROBADO_TARDIO"));
         payment.reembolsar(now);
         commissions.registrarDespuesDelCommit(payment.getId());
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -388,6 +418,12 @@ public class PaymentService {
      * la reserva nueva se reembolsa y sus asientos se devuelven.
      */
     public void confirmAndIssue(UUID bookingId) {
+        try (BookingMdc mdc = BookingMdc.con(bookingId)) {
+            confirmarYEmitir(bookingId);
+        }
+    }
+
+    private void confirmarYEmitir(UUID bookingId) {
         Booking booking = bookingRepository.findById(bookingId).orElse(null);
         if (booking == null || booking.getEstado() != BookingStatus.PAGO_APROBADO) {
             return;
@@ -433,6 +469,7 @@ public class PaymentService {
         }
         Ticket ticket = ticketService.issue(b);
         b.cambiarEstado(BookingStatus.CONFIRMADA, clock.instant());
+        medirEmision(b);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("bookingId", b.getId());
         payload.put("ticketId", ticket.getId());
@@ -449,6 +486,23 @@ public class PaymentService {
         // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
         ticketMail.sendAfterCommit(ticket.getId());
         return true;
+    }
+
+    /**
+     * HT-10: tripbus_tiquetes_emitidos_total{canal} y el Timer desde el pago aprobado hasta el tiquete. Se registran
+     * al confirmar la transacción (si se revierte, no cuenta).
+     */
+    private void medirEmision(Booking b) {
+        String canal = b.getCanal() != null ? b.getCanal().name() : null;
+        Instant pagado = paymentRepository.findByBookingIdOrderByCreadoEnDesc(b.getId()).stream()
+                .filter(p -> p.getEstado() == PaymentStatus.APROBADO).map(Payment::getCreadoEn).findFirst().orElse(null);
+        Instant emitido = clock.instant();
+        metricas.despuesDelCommit(() -> {
+            metricas.tiqueteEmitido(canal);
+            if (pagado != null) {
+                metricas.pagoHastaTiquete(Duration.between(pagado, emitido));
+            }
+        });
     }
 
     /** US-150: tras confirmar se anulan los asientos viejos; si no aplicó, se devuelven los nuevos y se reembolsa. */
@@ -477,6 +531,7 @@ public class PaymentService {
                     gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
                 }
                 Refund refund = refundRepository.save(Refund.de(payment, payment.getMonto(), motivo, now));
+                metricas.despuesDelCommit(() -> metricas.reembolso(motivo));
                 payment.reembolsar(now);
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("bookingId", bookingId);
@@ -504,12 +559,23 @@ public class PaymentService {
             Instant now = clock.instant();
             payment.rechazar(motivo, now);
             booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+            coupons.liberar(booking.getId());
             publishPaymentFailed(booking, motivo);
+            String metodo = payment.getMetodo();
+            metricas.despuesDelCommit(() -> metricas.pago(metodo, resultadoDelFallo(motivo)));
             return booking.getHoldId();
         });
         if (holdId != null) {
             releaseHoldQuietly(holdId, motivo);
         }
+    }
+
+    /** Resultado de tripbus_pagos_total para un pago que este servicio da por fallido. */
+    public static String resultadoDelFallo(String motivo) {
+        if (PASARELA_NO_DISPONIBLE.equals(motivo)) {
+            return MetricasBooking.PASARELA_NO_DISPONIBLE;
+        }
+        return SIN_RESPUESTA.equals(motivo) ? MetricasBooking.SIN_RESPUESTA : MetricasBooking.RECHAZADO;
     }
 
     private void publishPaymentFailed(Booking booking, String motivo) {

@@ -23,5 +23,7 @@ public record TicketResponse(
         BigDecimal total,
         String moneda,
         String qrCode,
-        String qrImage) {
+        String qrImage,
+        /* US-142: tramo del tiquete (parada de abordaje y de bajada); null = el viaje completo. */
+        TramoResponse tramo) {
 }

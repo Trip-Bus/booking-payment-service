@@ -146,6 +146,7 @@ class AffectedIT {
     @BeforeEach
     void preparar() {
         reset(seatInventory, catalog, gateway);
+        com.tripbus.booking.support.PreciosDePrueba.desdePrecioBase(catalog);
         userId = UUID.randomUUID();
         salida = Instant.now().plus(Duration.ofDays(2));
         viaje = itinerario(companyId, salida, "PROGRAMADO");
@@ -494,6 +495,7 @@ class AffectedIT {
         assertThat(afectada(ticket.getBookingId()).getEstado()).isEqualTo(AffectedBooking.Estado.PENDIENTE);
 
         reset(catalog);
+        com.tripbus.booking.support.PreciosDePrueba.desdePrecioBase(catalog);
         when(catalog.itinerary(viaje)).thenReturn(new CatalogClient.ItinerarySummary(viaje, "Bogotá", "Medellín",
                 salida, null, "Expreso Andino", "ABC123", companyId, "CANCELADO"));
         when(catalog.search(any(), any(), any())).thenReturn(List.of(opcion(fueraDeVentana,
@@ -543,7 +545,8 @@ class AffectedIT {
                 .andExpect(status().isOk())
                 .andExpect(header().string("Content-Type", org.hamcrest.Matchers.startsWith("text/csv")))
                 .andExpect(content().string(org.hamcrest.Matchers.startsWith(
-                        "nombre,tipoDocumento,numeroDocumento,asiento,bookingId,estadoTiquete,abordadoEn\n")))
+                        "nombre,tipoDocumento,numeroDocumento,asiento,bookingId,estadoTiquete,abordadoEn,"
+                                + "paradaAbordaje,paradaBajada\n")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("vendidos,3")));
 
         mvc.perform(get("/itineraries/{id}/manifest", viaje).with(rol("OPERADOR", UUID.randomUUID())))
