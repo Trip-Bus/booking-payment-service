@@ -87,10 +87,15 @@ public class Coupon {
         this.id = UUID.randomUUID();
         this.creadoPor = creadoPor;
         this.creadoEn = now;
-        actualizar(datos, now);
+        aplicar(datos, now);
     }
 
-    public final void actualizar(Datos d, Instant now) {
+    public void actualizar(Datos d, Instant now) {
+        aplicar(d, now);
+    }
+
+    /** Privado para poder usarlo en el constructor (un método de entidad JPA no puede ser final). */
+    private void aplicar(Datos d, Instant now) {
         this.codigo = d.codigo().trim();
         this.tipo = d.tipo().name();
         this.valor = d.valor();

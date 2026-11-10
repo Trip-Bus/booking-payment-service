@@ -46,6 +46,8 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -76,6 +78,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Testcontainers
 class TarifasCuponesYComprobantesIT {
+
+    private static final Pattern NUMERO_COMPROBANTE = Pattern.compile("Comprobante N\\. (TB-\\d{8})");
 
     /** Paradas de la ruta Bogotá - Ibagué, por orden. */
     private static final Map<Integer, String> PARADAS = Map.of(1, "Bogotá", 2, "Fusagasugá", 3, "Girardot", 4, "Ibagué");
@@ -243,6 +247,12 @@ class TarifasCuponesYComprobantesIT {
         return objectMapper.readTree(detalle);
     }
 
+    private static String numeroComprobante(String texto) {
+        Matcher m = NUMERO_COMPROBANTE.matcher(texto);
+        assertThat(m.find()).as("número de comprobante en el PDF").isTrue();
+        return m.group(1);
+    }
+
     private static String texto(byte[] pdf) throws IOException {
         PdfReader reader = new PdfReader(pdf);
         StringBuilder sb = new StringBuilder();
@@ -373,7 +383,7 @@ class TarifasCuponesYComprobantesIT {
                 .contains("Pasajero 0").contains("NINO").contains("VIP").contains("Cupón " + codigo)
                 .contains("37000 COP").contains("Total pagado").contains("148000 COP")
                 .doesNotContainIgnoringCase("comisi");
-        String numero = texto.replaceAll("(?s).*Comprobante N\\. (TB-\\d{8}).*", "$1");
+        String numero = numeroComprobante(texto);
         // El número no cambia si se vuelve a pedir.
         assertThat(texto(mvc.perform(get("/payments/{id}/receipt.pdf", paymentId).with(admin()))
                 .andReturn().getResponse().getContentAsByteArray())).contains(numero);
@@ -408,7 +418,7 @@ class TarifasCuponesYComprobantesIT {
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
         assertThat(reembolso).contains("Comprobante de reembolso").contains("Total reembolsado").contains("100000 COP")
                 .contains("ASIENTO_NO_CONFIRMADO");
-        String numeroReembolso = reembolso.replaceAll("(?s).*Comprobante N\\. (TB-\\d{8}).*", "$1");
+        String numeroReembolso = numeroComprobante(reembolso);
         assertThat(numeroReembolso.compareTo(numero)).isPositive();
         mvc.perform(get("/refunds/{id}/receipt.pdf", refundId).with(pasajero(UUID.randomUUID())))
                 .andExpect(status().isNotFound());
