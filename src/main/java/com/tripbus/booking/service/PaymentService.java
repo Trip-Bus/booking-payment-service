@@ -6,6 +6,8 @@ import com.tripbus.booking.client.RemoteErrors;
 import com.tripbus.booking.client.SeatInventoryClient;
 import com.tripbus.booking.common.error.ApiException;
 import com.tripbus.booking.common.events.EventPublisher;
+import com.tripbus.booking.config.BookingMdc;
+import com.tripbus.booking.observabilidad.MetricasBooking;
 import com.tripbus.booking.domain.Booking;
 import com.tripbus.booking.domain.BookingStatus;
 import com.tripbus.booking.domain.Payment;
@@ -30,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,17 +64,27 @@ public class PaymentService {
     private final WebhookSigner signer;
     private final TicketService ticketService;
     private final TicketMailService ticketMail;
+    private final RescheduleSaga rescheduleSaga;
     private final SagaLogger saga;
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CommissionService commissions;
+    private final MetricasBooking metricas;
+    private final CouponService coupons;
 
+    @SuppressWarnings("java:S107") // dependencias de la saga de compra, inyectadas por Spring
     public PaymentService(BookingRepository bookingRepository, PaymentRepository paymentRepository,
                           RefundRepository refundRepository, WebhookLogRepository webhookLogRepository,
                           SeatInventoryClient seatInventory, PaymentGateway gateway, WebhookSigner signer,
-                          TicketService ticketService, TicketMailService ticketMail, SagaLogger saga,
-                          EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper, Clock clock) {
+                          TicketService ticketService, TicketMailService ticketMail, RescheduleSaga rescheduleSaga,
+                          SagaLogger saga, EventPublisher events, TransactionTemplate tx, ObjectMapper objectMapper,
+                          Clock clock, CommissionService commissions, MetricasBooking metricas,
+                          CouponService coupons) {
+        this.coupons = coupons;
+        this.metricas = metricas;
+        this.commissions = commissions;
         this.bookingRepository = bookingRepository;
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
@@ -81,6 +94,7 @@ public class PaymentService {
         this.signer = signer;
         this.ticketService = ticketService;
         this.ticketMail = ticketMail;
+        this.rescheduleSaga = rescheduleSaga;
         this.saga = saga;
         this.events = events;
         this.tx = tx;
@@ -92,6 +106,8 @@ public class PaymentService {
 
     /** US-032: inicia el pago. La idempotencia por Idempotency-Key la aplica IdempotencyService. */
     public PaymentResponse pay(UUID bookingId, UUID userId, PayRequest request, String idempotencyKey) {
+        String method = request.method();
+        validatePaymentData(request, method);
         Booking snapshot = bookingRepository.findById(bookingId)
                 .filter(b -> b.getUserId().equals(userId))
                 .orElseThrow(() -> ApiException.notFound("BOOKING_NOT_FOUND", "La reserva no existe"));
@@ -112,6 +128,7 @@ public class PaymentService {
             tx.executeWithoutResult(s -> bookingRepository.lockById(bookingId).ifPresent(b -> {
                 if (b.getEstado() == BookingStatus.PENDIENTE_PAGO) {
                     b.cambiarEstado(BookingStatus.EXPIRADA, clock.instant());
+                    coupons.liberar(b.getId());
                     saga.log(b.getId(), "RETENCION_EXPIRADA", "OK", Map.of("holdId", b.getHoldId()));
                 }
             }));
@@ -126,7 +143,8 @@ public class PaymentService {
             }
             Instant now = clock.instant();
             Payment p = paymentRepository.save(new Payment(booking.getId(), booking.getTotal(),
-                    userId + ":" + idempotencyKey, request.cardLast4(), request.cardBrand(), now));
+                    userId + ":" + idempotencyKey, method, paymentLast4(request, method), request.cardBrand(),
+                    "PSE".equals(method) ? bankName(request.pse().bancoCodigo()) : null, now));
             booking.cambiarEstado(BookingStatus.PAGO_EN_PROCESO, now);
             saga.log(booking.getId(), "PAGO_SOLICITADO", "OK", Map.of("paymentId", p.getId(), "monto", p.getMonto()));
             return p;
@@ -140,9 +158,21 @@ public class PaymentService {
         }
 
         // Paso 7: llamar a la pasarela. Si falla, compensación: liberar la retención.
+        String redirectUrl = null;
         try {
-            String gatewayId = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(),
-                    request.cardToken());
+            if ("PSE".equals(method) || "NEQUI".equals(method)) extendHoldQuietly(snapshot.getHoldId());
+            String gatewayId;
+            if ("TARJETA".equals(method)) {
+                // Compatibilidad con los consumidores existentes de tarjeta durante la migración de la interfaz.
+                gatewayId = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(), request.cardToken());
+            } else {
+                PaymentGateway.ChargeResult gatewayResult = gateway.charge(payment.getId(), payment.getMonto(), snapshot.getMoneda(),
+                        new PaymentGateway.ChargeRequest(method, request.cardToken(),
+                                request.pse() == null ? null : request.pse().bancoCodigo(),
+                                request.nequi() == null ? null : request.nequi().telefono()));
+                gatewayId = gatewayResult.gatewayPaymentId();
+                redirectUrl = gatewayResult.redirectUrl();
+            }
             tx.executeWithoutResult(s -> paymentRepository.lockById(payment.getId()).ifPresent(p -> {
                 if (p.getPaymentGatewayId() == null) {
                     p.asignarGatewayId(gatewayId, clock.instant());
@@ -155,9 +185,23 @@ public class PaymentService {
             throw ApiException.unavailable("PAYMENT_GATEWAY_UNAVAILABLE",
                     "La pasarela de pagos no está disponible; no se realizó ningún cobro");
         }
+        String message = "NEQUI".equals(method) ? "Acepta el pago en tu app Nequi" : "Pago en proceso. El resultado llegará en unos segundos.";
         return new PaymentResponse(payment.getId(), bookingId, PaymentStatus.PENDIENTE.name(), payment.getMonto(),
-                snapshot.getMoneda(), "Pago en proceso. El resultado llegará en unos segundos.");
+                snapshot.getMoneda(), message, redirectUrl);
     }
+
+    private static void validatePaymentData(PayRequest request, String method) {
+        if (!List.of("TARJETA", "PSE", "NEQUI").contains(method)) throw ApiException.badRequest("INVALID_PAYMENT_METHOD", "Método de pago no soportado");
+        if ("TARJETA".equals(method) && (request.cardToken() == null || request.cardToken().isBlank())) throw ApiException.badRequest("INVALID_CARD", "El token de la tarjeta es obligatorio");
+        if ("NEQUI".equals(method) && (request.nequi() == null || request.nequi().telefono() == null || !request.nequi().telefono().matches("3\\d{9}"))) throw ApiException.badRequest("INVALID_NEQUI_PHONE", "El celular Nequi debe tener 10 dígitos colombianos");
+        if ("PSE".equals(method) && (request.pse() == null || !List.of("1", "2").contains(request.pse().bancoCodigo()) || !List.of("NATURAL", "JURIDICA").contains(request.pse().tipoPersona()) || request.pse().numeroDocumento() == null || request.pse().numeroDocumento().length() < 4)) throw ApiException.badRequest("INVALID_PSE", "Los datos PSE no son válidos");
+    }
+    private static String paymentLast4(PayRequest request, String method) {
+        String value = "NEQUI".equals(method) ? request.nequi().telefono() : "PSE".equals(method) ? request.pse().numeroDocumento() : request.cardLast4();
+        return value == null ? null : value.substring(Math.max(0, value.length() - 4));
+    }
+    private static String bankName(String code) { return "1".equals(code) ? "Banco que aprueba" : "Banco que rechaza"; }
+    private void extendHoldQuietly(UUID holdId) { try { seatInventory.extendHold(holdId, 300); } catch (RuntimeException e) { log.info("No fue necesario extender la retención {}", holdId); } }
 
     private PaymentResponse currentPaymentIfAny(Booking booking) {
         if (booking.getEstado() == BookingStatus.PENDIENTE_PAGO) {
@@ -182,8 +226,10 @@ public class PaymentService {
     static final String SIN_RESPUESTA = "SIN_RESPUESTA_DE_LA_PASARELA";
     static final String PASARELA_NO_DISPONIBLE = "PASARELA_NO_DISPONIBLE";
     static final String MONTO_INCORRECTO = "MONTO_INCORRECTO";
+    /** US-150: la reserva original ya no está CONFIRMADA con su tiquete EMITIDO al confirmar la nueva. */
+    static final String REPROGRAMACION_NO_APLICABLE = "REPROGRAMACION_NO_APLICABLE";
 
-    private record WebhookResult(WebhookOutcome outcome, UUID bookingId) {
+    private record WebhookResult(WebhookOutcome outcome, UUID bookingId, String metodo) {
     }
 
     /** US-034: el webhook es idempotente y tolerante a reintentos de la pasarela. */
@@ -211,7 +257,7 @@ public class PaymentService {
             try {
                 paymentId = UUID.fromString(reference);
             } catch (IllegalArgumentException e) {
-                return new WebhookResult(WebhookOutcome.IGNORADO, null);
+                return new WebhookResult(WebhookOutcome.IGNORADO, null, null);
             }
             Payment payment = paymentRepository.lockById(paymentId).orElse(null);
             boolean otroCobro = payment != null && payment.getPaymentGatewayId() != null && gatewayId != null
@@ -240,6 +286,7 @@ public class PaymentService {
                             event.path("currency").asText(""), payment.getMonto(), booking.getMoneda());
                     payment.rechazar(MONTO_INCORRECTO, now);
                     booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+                    coupons.liberar(booking.getId());
                     publishPaymentFailed(booking, MONTO_INCORRECTO);
                     outcome = WebhookOutcome.MONTO_INCORRECTO;
                 } else if ("APPROVED".equals(status)) {
@@ -252,28 +299,48 @@ public class PaymentService {
                     payload.put("timestamp", now);
                     saga.log(booking.getId(), "PAGO_APROBADO", "OK", payload);
                     events.publishAfterCommit(BookingEvents.PAYMENT_APPROVED, payload);
+                    commissions.registrarDespuesDelCommit(payment.getId());
                     outcome = WebhookOutcome.APROBADO;
                 } else {
                     String motivo = reason != null ? reason : "RECHAZADO_POR_PASARELA";
                     payment.rechazar(motivo, now);
                     booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+                    coupons.liberar(booking.getId());
                     publishPaymentFailed(booking, motivo);
                     outcome = WebhookOutcome.RECHAZADO;
                 }
             }
             webhookLogRepository.save(new WebhookLog(eventId, rawBody, signature, true, outcome.name(), clock.instant()));
-            return new WebhookResult(outcome, bookingId);
+            return new WebhookResult(outcome, bookingId, payment != null ? payment.getMetodo() : null);
         });
 
         WebhookOutcome outcome = Objects.requireNonNull(result).outcome();
         UUID bookingId = result.bookingId();
-        if (outcome == WebhookOutcome.APROBADO) {
-            confirmAndIssue(bookingId);
-        } else if (outcome == WebhookOutcome.RECHAZADO || outcome == WebhookOutcome.MONTO_INCORRECTO) {
-            String motivo = outcome == WebhookOutcome.RECHAZADO ? "PAGO_RECHAZADO" : MONTO_INCORRECTO;
-            bookingRepository.findById(bookingId).ifPresent(b -> releaseHoldQuietly(b.getHoldId(), motivo));
+        contarPago(result);
+        try (BookingMdc mdc = BookingMdc.con(bookingId)) {
+            log.info("Webhook de la pasarela procesado: {}", outcome);
+            if (outcome == WebhookOutcome.APROBADO) {
+                confirmAndIssue(bookingId);
+            } else if (outcome == WebhookOutcome.RECHAZADO || outcome == WebhookOutcome.MONTO_INCORRECTO) {
+                String motivo = outcome == WebhookOutcome.RECHAZADO ? "PAGO_RECHAZADO" : MONTO_INCORRECTO;
+                bookingRepository.findById(bookingId).ifPresent(b -> releaseHoldQuietly(b.getHoldId(), motivo));
+            }
         }
         return outcome;
+    }
+
+    /** HT-10: tripbus_pagos_total; los webhooks duplicados o ajenos no cuentan (el cobro ya se contó). */
+    private void contarPago(WebhookResult result) {
+        String resultado = switch (result.outcome()) {
+            case APROBADO -> MetricasBooking.APROBADO;
+            case RECHAZADO -> MetricasBooking.RECHAZADO;
+            case MONTO_INCORRECTO -> MetricasBooking.MONTO_INCORRECTO;
+            case APROBADO_TARDIO_REEMBOLSADO -> MetricasBooking.APROBADO_TARDIO;
+            case DUPLICADO, IGNORADO -> null;
+        };
+        if (resultado != null) {
+            metricas.pago(result.metodo(), resultado);
+        }
     }
 
     /**
@@ -303,8 +370,12 @@ public class PaymentService {
         log.warn("Pago {} aprobado por la pasarela después de darlo por fallido ({}): se reembolsa {}",
                 payment.getId(), payment.getMotivoRechazo(), monto);
         gateway.refund(payment.getPaymentGatewayId(), monto);
-        Refund refund = refundRepository.save(new Refund(payment.getId(), monto, "APROBADO_TARDIO", now));
+        // US-190: la pasarela sí cobró, así que cuenta como venta (aprobado_en) y su reembolso revierte la comisión.
+        payment.aprobar(now);
+        Refund refund = refundRepository.save(Refund.de(payment, monto, "APROBADO_TARDIO", now));
+        metricas.despuesDelCommit(() -> metricas.reembolso("APROBADO_TARDIO"));
         payment.reembolsar(now);
+        commissions.registrarDespuesDelCommit(payment.getId());
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("bookingId", payment.getBookingId());
         payload.put("paymentId", payment.getId());
@@ -342,10 +413,25 @@ public class PaymentService {
     /**
      * Pasos 9-11: ConfirmSale en Seat Inventory y emisión del tiquete. Si Seat Inventory no
      * responde, la reserva queda en PAGO_APROBADO y el job de recuperación lo reintenta.
+     * US-150: si la reserva es una reprogramación, en la misma transacción se retira el tiquete viejo
+     * ({@link RescheduleSaga}) y después se anulan sus asientos. Si el tiquete viejo ya se usó para abordar,
+     * la reserva nueva se reembolsa y sus asientos se devuelven.
      */
     public void confirmAndIssue(UUID bookingId) {
+        try (BookingMdc mdc = BookingMdc.con(bookingId)) {
+            confirmarYEmitir(bookingId);
+        }
+    }
+
+    private void confirmarYEmitir(UUID bookingId) {
         Booking booking = bookingRepository.findById(bookingId).orElse(null);
         if (booking == null || booking.getEstado() != BookingStatus.PAGO_APROBADO) {
+            return;
+        }
+        boolean reprogramacion = booking.getOrigenBookingId() != null;
+        if (reprogramacion && !rescheduleSaga.sigueVigente(booking)) {
+            log.warn("La reserva {} ya no puede reemplazar a {}: se reembolsa", bookingId, booking.getOrigenBookingId());
+            refundAndRelease(bookingId, REPROGRAMACION_NO_APLICABLE);
             return;
         }
         try {
@@ -361,27 +447,73 @@ public class PaymentService {
             return;
         }
 
-        tx.executeWithoutResult(s -> {
-            Booking b = bookingRepository.lockById(bookingId).orElseThrow();
-            if (b.getEstado() != BookingStatus.PAGO_APROBADO) {
-                return;
+        Boolean confirmada = tx.execute(s -> emitirTiquete(bookingId, reprogramacion));
+        if (reprogramacion) {
+            terminarReprogramacion(booking, Boolean.TRUE.equals(confirmada));
+        }
+    }
+
+    /**
+     * Dentro de la transacción: tiquete emitido y reserva CONFIRMADA (en una reprogramación, además se retira el
+     * tiquete viejo). Devuelve false si la reprogramación ya no aplica porque el tiquete viejo se usó para abordar.
+     */
+    private boolean emitirTiquete(UUID bookingId, boolean reprogramacion) {
+        Booking b = bookingRepository.lockById(bookingId).orElseThrow();
+        if (b.getEstado() != BookingStatus.PAGO_APROBADO) {
+            return true;
+        }
+        saga.log(bookingId, "ASIENTO_VENDIDO", "OK", Map.of("holdId", b.getHoldId()));
+        RescheduleSaga.Retiro retiro = reprogramacion ? rescheduleSaga.retirarAnterior(b) : null;
+        if (reprogramacion && retiro == null) {
+            return false;
+        }
+        Ticket ticket = ticketService.issue(b);
+        b.cambiarEstado(BookingStatus.CONFIRMADA, clock.instant());
+        medirEmision(b);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("bookingId", b.getId());
+        payload.put("ticketId", ticket.getId());
+        payload.put("qrCode", ticket.getQrToken());
+        payload.put("itineraryId", b.getItineraryId());
+        payload.put("seatNumbers", b.getSeatNumbers());
+        payload.put("userId", b.getUserId());
+        payload.put("offerId", b.getOfferId());
+        saga.log(bookingId, "TIQUETE_EMITIDO", "OK", Map.of("ticketId", ticket.getId()));
+        events.publishAfterCommit(BookingEvents.TICKET_ISSUED, payload);
+        if (retiro != null) {
+            rescheduleSaga.registrar(b, retiro, ticket);
+        }
+        // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
+        ticketMail.sendAfterCommit(ticket.getId());
+        return true;
+    }
+
+    /**
+     * HT-10: tripbus_tiquetes_emitidos_total{canal} y el Timer desde el pago aprobado hasta el tiquete. Se registran
+     * al confirmar la transacción (si se revierte, no cuenta).
+     */
+    private void medirEmision(Booking b) {
+        String canal = b.getCanal() != null ? b.getCanal().name() : null;
+        Instant pagado = paymentRepository.findByBookingIdOrderByCreadoEnDesc(b.getId()).stream()
+                .filter(p -> p.getEstado() == PaymentStatus.APROBADO).map(Payment::getCreadoEn).findFirst().orElse(null);
+        Instant emitido = clock.instant();
+        metricas.despuesDelCommit(() -> {
+            metricas.tiqueteEmitido(canal);
+            if (pagado != null) {
+                metricas.pagoHastaTiquete(Duration.between(pagado, emitido));
             }
-            saga.log(bookingId, "ASIENTO_VENDIDO", "OK", Map.of("holdId", b.getHoldId()));
-            Ticket ticket = ticketService.issue(b);
-            b.cambiarEstado(BookingStatus.CONFIRMADA, clock.instant());
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("bookingId", b.getId());
-            payload.put("ticketId", ticket.getId());
-            payload.put("qrCode", ticket.getQrToken());
-            payload.put("itineraryId", b.getItineraryId());
-            payload.put("seatNumbers", b.getSeatNumbers());
-            payload.put("userId", b.getUserId());
-            payload.put("offerId", b.getOfferId());
-            saga.log(bookingId, "TIQUETE_EMITIDO", "OK", Map.of("ticketId", ticket.getId()));
-            events.publishAfterCommit(BookingEvents.TICKET_ISSUED, payload);
-            // US-033: correo con el QR en segundo plano tras el commit; si falla no toca la reserva ni el pago.
-            ticketMail.sendAfterCommit(ticket.getId());
         });
+    }
+
+    /** US-150: tras confirmar se anulan los asientos viejos; si no aplicó, se devuelven los nuevos y se reembolsa. */
+    private void terminarReprogramacion(Booking booking, boolean confirmada) {
+        if (confirmada) {
+            rescheduleSaga.anularAsientosAnteriores(booking.getOrigenBookingId());
+            return;
+        }
+        log.warn("El tiquete anterior de la reserva {} ya se usó: se reembolsa la reprogramación", booking.getId());
+        rescheduleSaga.devolverAsientosNuevos(booking);
+        refundAndRelease(booking.getId(), REPROGRAMACION_NO_APLICABLE);
     }
 
     /** Compensación: el pago se aprobó pero el asiento se perdió → reembolso y liberación. */
@@ -395,8 +527,11 @@ public class PaymentService {
                     .filter(p -> p.getEstado() == PaymentStatus.APROBADO).findFirst().orElse(null);
             Instant now = clock.instant();
             if (payment != null && refundRepository.findByPaymentId(payment.getId()).isEmpty()) {
-                gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
-                Refund refund = refundRepository.save(new Refund(payment.getId(), payment.getMonto(), motivo, now));
+                if (!payment.enEfectivo()) {
+                    gateway.refund(payment.getPaymentGatewayId(), payment.getMonto());
+                }
+                Refund refund = refundRepository.save(Refund.de(payment, payment.getMonto(), motivo, now));
+                metricas.despuesDelCommit(() -> metricas.reembolso(motivo));
                 payment.reembolsar(now);
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("bookingId", bookingId);
@@ -424,12 +559,23 @@ public class PaymentService {
             Instant now = clock.instant();
             payment.rechazar(motivo, now);
             booking.cambiarEstado(BookingStatus.PAGO_RECHAZADO, now);
+            coupons.liberar(booking.getId());
             publishPaymentFailed(booking, motivo);
+            String metodo = payment.getMetodo();
+            metricas.despuesDelCommit(() -> metricas.pago(metodo, resultadoDelFallo(motivo)));
             return booking.getHoldId();
         });
         if (holdId != null) {
             releaseHoldQuietly(holdId, motivo);
         }
+    }
+
+    /** Resultado de tripbus_pagos_total para un pago que este servicio da por fallido. */
+    public static String resultadoDelFallo(String motivo) {
+        if (PASARELA_NO_DISPONIBLE.equals(motivo)) {
+            return MetricasBooking.PASARELA_NO_DISPONIBLE;
+        }
+        return SIN_RESPUESTA.equals(motivo) ? MetricasBooking.SIN_RESPUESTA : MetricasBooking.RECHAZADO;
     }
 
     private void publishPaymentFailed(Booking booking, String motivo) {

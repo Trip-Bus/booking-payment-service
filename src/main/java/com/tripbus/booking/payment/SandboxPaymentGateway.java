@@ -5,6 +5,11 @@ import com.tripbus.booking.config.PaymentProperties;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.tracing.CurrentTraceContext;
+import io.micrometer.tracing.Tracer;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -16,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -38,21 +44,43 @@ public class SandboxPaymentGateway implements PaymentGateway {
     private final ObjectMapper objectMapper;
     private final RestClient restClient;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+    private final Map<String, Map<String, Object>> pendingPse = new ConcurrentHashMap<>();
+
+    /** HT-10: el webhook sale en otro hilo; con este contexto sigue en la misma traza que el cobro. */
+    private final CurrentTraceContext traceContext;
 
     public SandboxPaymentGateway(PaymentProperties properties, WebhookSigner signer, ObjectMapper objectMapper) {
+        this(properties, signer, objectMapper, ObservationRegistry.NOOP, Tracer.NOOP);
+    }
+
+    @Autowired
+    public SandboxPaymentGateway(PaymentProperties properties, WebhookSigner signer, ObjectMapper objectMapper,
+                                 ObservationRegistry observations, ObjectProvider<Tracer> tracer) {
+        this(properties, signer, objectMapper, observations, tracer.getIfAvailable(() -> Tracer.NOOP));
+    }
+
+    SandboxPaymentGateway(PaymentProperties properties, WebhookSigner signer, ObjectMapper objectMapper,
+                          ObservationRegistry observations, Tracer tracer) {
         this.properties = properties;
         this.signer = signer;
         this.objectMapper = objectMapper;
+        this.traceContext = tracer.currentTraceContext();
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(2000);
         factory.setReadTimeout(10000);
-        this.restClient = RestClient.builder().requestFactory(factory).build();
+        this.restClient = RestClient.builder().requestFactory(factory).observationRegistry(observations).build();
+    }
+
+    /** Programa una tarea conservando la traza actual (el webhook lleva el traceparent del cobro). */
+    private void programar(Runnable tarea, long delayMs) {
+        scheduler.schedule(traceContext.wrap(tarea), delayMs, TimeUnit.MILLISECONDS);
     }
 
     @Override
-    public String charge(UUID paymentId, BigDecimal amount, String currency, String cardToken) {
+    public ChargeResult charge(UUID paymentId, BigDecimal amount, String currency, ChargeRequest request) {
         String gatewayId = "sbx_" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
-        boolean declined = cardToken.toLowerCase(Locale.ROOT).contains("declined");
+        String method = request.method();
+        boolean declined = "TARJETA".equals(method) && request.cardToken().toLowerCase(Locale.ROOT).contains("declined");
 
         Map<String, Object> event = new LinkedHashMap<>();
         event.put("eventId", "evt_" + UUID.randomUUID().toString().replace("-", "").substring(0, 20));
@@ -64,13 +92,37 @@ public class SandboxPaymentGateway implements PaymentGateway {
         event.put("currency", currency);
         event.put("timestamp", Instant.now().toString());
 
-        long delay = properties.webhookDelay().toMillis();
-        scheduler.schedule(() -> sendWebhook(event), delay, TimeUnit.MILLISECONDS);
+        if ("PSE".equals(method)) {
+            pendingPse.put(gatewayId, event);
+            programar(() -> completePse(gatewayId, false), properties.pseTimeout().toMillis());
+            return new ChargeResult(gatewayId, "/sandbox/pse/" + gatewayId);
+        }
+        if ("NEQUI".equals(method)) {
+            String phone = request.phone();
+            event.put("status", "3991111111".equals(phone) ? "APPROVED" : "DECLINED");
+            event.put("reason", "3992222222".equals(phone) ? "PAGO_RECHAZADO_POR_NEQUI" :
+                    ("3991111111".equals(phone) ? null : "ERROR_NEQUI"));
+        }
+        long delay = "NEQUI".equals(method) ? properties.nequiDelay().toMillis() : properties.webhookDelay().toMillis();
+        programar(() -> sendWebhook(event), delay);
         if (properties.duplicateWebhook()) {
-            scheduler.schedule(() -> sendWebhook(event), delay + 800, TimeUnit.MILLISECONDS);
+            programar(() -> sendWebhook(event), delay + 800);
         }
         log.info("[sandbox] cobro {} por {} {} -> {}", gatewayId, amount, currency, event.get("status"));
-        return gatewayId;
+        return new ChargeResult(gatewayId, null);
+    }
+
+    /** La p\u00e1gina de banco de pruebas completa una PSE una sola vez. */
+    public boolean completePse(String gatewayPaymentId, boolean approved) {
+        Map<String, Object> event = pendingPse.remove(gatewayPaymentId);
+        if (event == null) return false;
+        event.put("status", approved ? "APPROVED" : "DECLINED");
+        event.put("reason", approved ? null : "PSE_RECHAZADO_O_VENCIDO");
+        sendWebhook(event);
+        if (properties.duplicateWebhook()) {
+            programar(() -> sendWebhook(event), 800);
+        }
+        return true;
     }
 
     @Override

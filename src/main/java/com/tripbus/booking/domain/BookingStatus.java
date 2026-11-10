@@ -8,5 +8,7 @@ public enum BookingStatus {
     CONFIRMADA,
     PAGO_RECHAZADO,
     EXPIRADA,
-    REEMBOLSADA
+    REEMBOLSADA,
+    /** US-150: la reserva se cambió por otra (origen_booking_id de la nueva); su tiquete quedó REPROGRAMADO. */
+    REPROGRAMADA
 }

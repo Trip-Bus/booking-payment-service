@@ -7,13 +7,17 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.DynamicUpdate;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.UUID;
 
 /** Pago con tarjeta. Nunca se guarda el número completo: solo token de la pasarela y últimos 4. */
 @Entity
+// Solo se escriben las columnas que cambian: CommissionService completa la comisión con un UPDATE propio.
+@DynamicUpdate
 @Table(name = "payments")
 public class Payment {
 
@@ -45,6 +49,12 @@ public class Payment {
     @Column(name = "tarjeta_marca")
     private String tarjetaMarca;
 
+    @Column(name = "banco")
+    private String banco;
+
+    @Column(name = "medio_pago_ultimos4")
+    private String medioPagoUltimos4;
+
     @Column(name = "motivo_rechazo")
     private String motivoRechazo;
 
@@ -54,23 +64,57 @@ public class Payment {
     @Column(name = "actualizado_en", nullable = false)
     private Instant actualizadoEn;
 
+    /** US-190: cuándo quedó aprobado (fecha de la venta en los reportes); null si nunca se aprobó. */
+    @Column(name = "aprobado_en")
+    private Instant aprobadoEn;
+
+    /** US-190: comisión de TripBus vigente en la fecha de la venta (0 a 30 %); null mientras catalog no responda. */
+    @Column(name = "comision_porcentaje")
+    private BigDecimal comisionPorcentaje;
+
+    /** US-190: monto × porcentaje / 100, redondeado al peso. */
+    @Column(name = "comision_valor")
+    private BigDecimal comisionValor;
+
     @Version
     private long version;
 
     protected Payment() {
     }
 
-    public Payment(UUID bookingId, BigDecimal monto, String idempotencyKey, String ultimos4, String marca, Instant now) {
+    public Payment(UUID bookingId, BigDecimal monto, String idempotencyKey, String metodo, String ultimos4, String marca,
+                   String banco, Instant now) {
         this.id = UUID.randomUUID();
         this.bookingId = bookingId;
         this.monto = monto;
-        this.metodo = "TARJETA";
+        this.metodo = metodo;
         this.estado = PaymentStatus.PENDIENTE;
         this.idempotencyKey = idempotencyKey;
         this.tarjetaUltimos4 = ultimos4;
         this.tarjetaMarca = marca;
+        this.banco = banco;
+        this.medioPagoUltimos4 = ultimos4;
         this.creadoEn = now;
         this.actualizadoEn = now;
+    }
+
+    public Payment(UUID bookingId, BigDecimal monto, String idempotencyKey, String ultimos4, String marca, Instant now) {
+        this(bookingId, monto, idempotencyKey, "TARJETA", ultimos4, marca, null, now);
+    }
+
+    /** US-144: método de la venta en taquilla. No pasa por la pasarela: se aprueba al recibir el efectivo. */
+    public static final String EFECTIVO = "EFECTIVO";
+
+    /** US-144: pago en efectivo recibido en taquilla, aprobado al instante. */
+    public static Payment efectivo(UUID bookingId, BigDecimal monto, String idempotencyKey, Instant now) {
+        Payment p = new Payment(bookingId, monto, idempotencyKey, EFECTIVO, null, null, null, now);
+        p.aprobar(now);
+        return p;
+    }
+
+    /** Un pago en efectivo no tiene cobro en la pasarela: su reembolso lo entrega la taquilla. */
+    public boolean enEfectivo() {
+        return EFECTIVO.equals(metodo);
     }
 
     public void asignarGatewayId(String gatewayId, Instant now) {
@@ -80,7 +124,27 @@ public class Payment {
 
     public void aprobar(Instant now) {
         this.estado = PaymentStatus.APROBADO;
+        if (this.aprobadoEn == null) {
+            this.aprobadoEn = now;
+        }
         this.actualizadoEn = now;
+    }
+
+    /** US-190: valor de la comisión para un porcentaje (0 a 30): monto × porcentaje / 100, redondeado al peso. */
+    public static BigDecimal comision(BigDecimal monto, BigDecimal porcentaje) {
+        return monto.multiply(porcentaje).divide(BigDecimal.valueOf(100), 0, RoundingMode.HALF_UP);
+    }
+
+    public Instant getAprobadoEn() {
+        return aprobadoEn;
+    }
+
+    public BigDecimal getComisionPorcentaje() {
+        return comisionPorcentaje;
+    }
+
+    public BigDecimal getComisionValor() {
+        return comisionValor;
     }
 
     public void rechazar(String motivo, Instant now) {
@@ -129,6 +193,9 @@ public class Payment {
     public String getTarjetaMarca() {
         return tarjetaMarca;
     }
+
+    public String getBanco() { return banco; }
+    public String getMedioPagoUltimos4() { return medioPagoUltimos4; }
 
     public String getMotivoRechazo() {
         return motivoRechazo;

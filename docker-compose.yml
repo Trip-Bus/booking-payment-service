@@ -70,6 +70,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       IDENTITY_JWKS_URI: http://host.docker.internal:18001/.well-known/jwks.json
+      IDENTITY_URL: http://host.docker.internal:18001
       CATALOG_URL: http://host.docker.internal:18002
       SEAT_INVENTORY_URL: http://host.docker.internal:18003
       FLASH_OFFERS_URL: http://host.docker.internal:18006

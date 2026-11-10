@@ -28,19 +28,20 @@
         <postgresql.version>42.7.12</postgresql.version>
 
         <zxing.version>3.5.3</zxing.version>
+        <!-- US-145: PDF del tiquete. OpenPDF (LGPL-2.1 / MPL-2.0), sin dependencias obligatorias. -->
+        <openpdf.version>2.2.2</openpdf.version>
         <greenmail.version>2.1.3</greenmail.version>
         <springdoc.version>2.8.17</springdoc.version>
-        <logstash-logback.version>8.0</logstash-logback.version>
         <jacoco.version>0.8.12</jacoco.version>
         <sonar-maven-plugin.version>5.8.0.7211</sonar-maven-plugin.version>
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-12 (brechas de pagos: monto del webhook, aprobado tardío,
-             máquina de estados y operador por empresa) redondeada hacia abajo al 5 %:
-             líneas 74,0 % -> 0.70; ramas 61,2 % -> 0.60. -->
-        <jacoco.minimo.lineas>0.70</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.60</jacoco.minimo.ramas>
+             Fijados con la medición del 2026-11-05 (Sprints 5 y 6: observabilidad, tarifas, tramos, comprobantes y
+             cupones) redondeada hacia abajo al 5 %:
+             líneas 97,0 % -> 0.95; ramas 91,5 % -> 0.90. -->
+        <jacoco.minimo.lineas>0.95</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.90</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
@@ -66,8 +67,13 @@
             **/web/dto/SagaStepResponse.java,
             **/web/dto/TicketResponse.java,
             **/web/dto/ValidateTicketRequest.java,
+            **/web/dto/RescheduleRequest.java,
+            **/web/dto/ChangeSeatRequest.java,
+            **/web/dto/AffectedBookingResponse.java,
+            **/repository/ManifestRow.java,
             **/domain/Passenger.java,
-            **/domain/Refund.java,
+            **/domain/PassengerChange.java,
+            **/domain/ManifestAccessLog.java,
             **/domain/SagaLogEntry.java,
             **/domain/Ticket.java,
             **/domain/WebhookLog.java,
@@ -152,6 +158,13 @@
             <version>${zxing.version}</version>
         </dependency>
 
+        <!-- US-145: tiquete en PDF. -->
+        <dependency>
+            <groupId>com.github.librepdf</groupId>
+            <artifactId>openpdf</artifactId>
+            <version>${openpdf.version}</version>
+        </dependency>
+
         <!-- Swagger UI / OpenAPI (solo IDE y QA; apagado en application-prod.yml). -->
         <dependency>
             <groupId>org.springdoc</groupId>
@@ -159,11 +172,16 @@
             <version>${springdoc.version}</version>
         </dependency>
 
-        <!-- Logs en JSON en PROD (logback-spring.xml). -->
+        <!-- HT-10: trazas distribuidas (Micrometer Tracing sobre OpenTelemetry) exportadas por OTLP/HTTP
+             cuando OTEL_EXPORTER_OTLP_ENDPOINT tiene valor (ver config.ObservabilidadEnvironment). -->
         <dependency>
-            <groupId>net.logstash.logback</groupId>
-            <artifactId>logstash-logback-encoder</artifactId>
-            <version>${logstash-logback.version}</version>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
         </dependency>
 
         <dependency>
@@ -274,8 +292,13 @@
                         <exclude>**/web/dto/SagaStepResponse.class</exclude>
                         <exclude>**/web/dto/TicketResponse.class</exclude>
                         <exclude>**/web/dto/ValidateTicketRequest.class</exclude>
+                        <exclude>**/web/dto/RescheduleRequest.class</exclude>
+                        <exclude>**/web/dto/ChangeSeatRequest.class</exclude>
+                        <exclude>**/web/dto/AffectedBookingResponse.class</exclude>
+                        <exclude>**/repository/ManifestRow.class</exclude>
                         <exclude>**/domain/Passenger.class</exclude>
-                        <exclude>**/domain/Refund.class</exclude>
+                        <exclude>**/domain/PassengerChange.class</exclude>
+                        <exclude>**/domain/ManifestAccessLog.class</exclude>
                         <exclude>**/domain/SagaLogEntry.class</exclude>
                         <exclude>**/domain/Ticket.class</exclude>
                         <exclude>**/domain/WebhookLog.class</exclude>

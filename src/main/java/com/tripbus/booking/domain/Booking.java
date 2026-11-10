@@ -9,7 +9,9 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -23,8 +25,9 @@ import java.util.UUID;
 public class Booking {
 
     /**
-     * Transiciones permitidas de la saga de compra. Los estados finales (CONFIRMADA, PAGO_RECHAZADO,
-     * EXPIRADA, REEMBOLSADA) no tienen salida.
+     * Transiciones permitidas de la saga de compra. Los estados finales (PAGO_RECHAZADO, EXPIRADA,
+     * REEMBOLSADA, REPROGRAMADA) no tienen salida; CONFIRMADA solo sale por una reprogramación (US-150)
+     * o por el reembolso de una reserva afectada por la empresa (US-154/US-155).
      */
     private static final Map<BookingStatus, Set<BookingStatus>> TRANSICIONES = new EnumMap<>(BookingStatus.class);
 
@@ -38,6 +41,9 @@ public class Booking {
         TRANSICIONES.put(BookingStatus.PAGO_EN_PROCESO, EnumSet.of(BookingStatus.PAGO_APROBADO, BookingStatus.PAGO_RECHAZADO));
         // Asiento confirmado y tiquete emitido, o el asiento se perdió y se reembolsa.
         TRANSICIONES.put(BookingStatus.PAGO_APROBADO, EnumSet.of(BookingStatus.CONFIRMADA, BookingStatus.REEMBOLSADA));
+        // US-150: se confirmó la reserva nueva que la reemplaza. US-154/US-155: la empresa canceló o cambió el
+        // viaje y se reembolsa (AffectedBookingService es el único que lo hace: no hay reembolso voluntario).
+        TRANSICIONES.put(BookingStatus.CONFIRMADA, EnumSet.of(BookingStatus.REPROGRAMADA, BookingStatus.REEMBOLSADA));
     }
 
     @Id
@@ -82,6 +88,84 @@ public class Booking {
     @Column(name = "company_id")
     private UUID companyId;
 
+    /** US-150: reserva de la que viene esta reprogramación (null en una compra normal). */
+    @Column(name = "origen_booking_id")
+    private UUID origenBookingId;
+
+    /** US-150: valor del pasaje ya pagado en la cadena de reprogramaciones (null en una compra normal). */
+    @Column(name = "valor_pagado")
+    private BigDecimal valorPagado;
+
+    /** US-138/US-141: suma del desglose por pasajero que dio catalog (antes del cupón). */
+    @Column(name = "subtotal")
+    private BigDecimal subtotal;
+
+    /** US-147: descuento del cupón aplicado (0 sin cupón). total = subtotal - descuentoCupon. */
+    @Column(name = "descuento_cupon", nullable = false)
+    private BigDecimal descuentoCupon = BigDecimal.ZERO;
+
+    @Column(name = "coupon_id")
+    private UUID couponId;
+
+    @Column(name = "cupon_codigo")
+    private String cuponCodigo;
+
+    @Column(name = "route_id")
+    private UUID routeId;
+
+    /** US-142: tramo comprado (orden y nombre de las paradas); null = el viaje completo. */
+    @Column(name = "from_orden")
+    private Integer fromOrden;
+
+    @Column(name = "to_orden")
+    private Integer toOrden;
+
+    @Column(name = "parada_abordaje")
+    private String paradaAbordaje;
+
+    @Column(name = "parada_bajada")
+    private String paradaBajada;
+
+    /** US-150: en una reserva REPROGRAMADA, cuándo quedó resuelta la anulación de sus asientos viejos. */
+    @Column(name = "anulacion_resuelta_en")
+    private Instant anulacionResueltaEn;
+
+    /** US-145: datos del viaje copiados de catalog (null mientras TripDataBackfill no los rellene). */
+    @Column(name = "origen")
+    private String origen;
+
+    @Column(name = "destino")
+    private String destino;
+
+    /** Salida del viaje; ItineraryRescheduled la actualiza. */
+    @Column(name = "fecha_salida")
+    private Instant fechaSalida;
+
+    @Column(name = "empresa_nombre")
+    private String empresaNombre;
+
+    /** US-144: APP (compra del pasajero) o TAQUILLA (venta en efectivo de un operador). */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Canal canal = Canal.APP;
+
+    /** US-144: operador que hizo la venta en taquilla (null en la app). */
+    @Column(name = "vendido_por")
+    private UUID vendidoPor;
+
+    @Column(name = "comprador_nombre")
+    private String compradorNombre;
+
+    @Column(name = "comprador_email")
+    private String compradorEmail;
+
+    @Column(name = "comprador_telefono")
+    private String compradorTelefono;
+
+    /** US-131: cuándo se borraron los datos de contacto porque el usuario eliminó su cuenta; null si no. */
+    @Column(name = "usuario_eliminado_en")
+    private Instant usuarioEliminadoEn;
+
     @Column(name = "creado_en", nullable = false)
     private Instant creadoEn;
 
@@ -122,6 +206,153 @@ public class Booking {
         this.emailContacto = emailContacto;
         this.estado = BookingStatus.PENDIENTE_PAGO;
         this.creadoEn = now;
+        this.actualizadoEn = now;
+    }
+
+    /**
+     * US-150: reserva nueva que reemplaza a {@code origen} con los asientos de otra retención. {@code total} es lo
+     * que falta pagar (la diferencia más el cargo); si es cero no hay nada que cobrar y la reserva nace en
+     * PAGO_APROBADO, lista para confirmar el asiento y emitir el tiquete. {@code valorPagado} es el pasaje que
+     * queda pagado en la cadena (nunca baja: no hay reembolso por decisión del pasajero).
+     */
+    public static Booking reprogramacion(Booking origen, SeatSelection seleccion, BigDecimal precioUnitario,
+                                         BigDecimal total, BigDecimal valorPagado, String emailContacto, Instant now) {
+        Booking b = new Booking(seleccion.holdId(), origen.getUserId(), seleccion.itineraryId(), seleccion.offerId(),
+                seleccion.seatNumbers(), precioUnitario, origen.getMoneda(), seleccion.holdExpiraEn(), emailContacto,
+                origen.getCompanyId(), now);
+        b.origenBookingId = origen.getId();
+        b.total = total;
+        b.valorPagado = valorPagado;
+        if (total.signum() == 0) {
+            b.estado = BookingStatus.PAGO_APROBADO;
+        }
+        return b;
+    }
+
+    /** Asientos retenidos con los que se arma una reserva (los datos de la retención de seat-inventory). */
+    public record SeatSelection(UUID holdId, UUID itineraryId, UUID offerId, List<String> seatNumbers,
+                                Instant holdExpiraEn) {
+    }
+
+    public enum Canal { APP, TAQUILLA }
+
+    /** US-145: datos del viaje que se guardan en la reserva. */
+    public record Viaje(String origen, String destino, Instant fechaSalida, String empresa) {
+    }
+
+    /** US-144: quién vendió en taquilla y los datos que dio el comprador (email y teléfono opcionales). */
+    public record VentaTaquilla(UUID vendidoPor, String compradorNombre, String compradorEmail,
+                                String compradorTelefono) {
+    }
+
+    /**
+     * US-144: venta en taquilla. La reserva queda a nombre de {@code userId} (el pasajero registrado con el correo
+     * del comprador, o el operador) y el tiquete se envía al correo del comprador si lo dio.
+     */
+    public static Booking taquilla(SeatSelection seleccion, UUID userId, VentaTaquilla venta, BigDecimal precioUnitario,
+                                   String moneda, UUID companyId, Instant now) {
+        Booking b = new Booking(seleccion.holdId(), userId, seleccion.itineraryId(), seleccion.offerId(),
+                seleccion.seatNumbers(), precioUnitario, moneda, seleccion.holdExpiraEn(), venta.compradorEmail(),
+                companyId, now);
+        b.canal = Canal.TAQUILLA;
+        b.vendidoPor = venta.vendidoPor();
+        b.compradorNombre = venta.compradorNombre();
+        b.compradorEmail = venta.compradorEmail();
+        b.compradorTelefono = venta.compradorTelefono();
+        return b;
+    }
+
+    /** US-145: copia los datos del viaje (los null no reemplazan lo que ya había). */
+    /** US-142: tramo comprado. */
+    public record Tramo(Integer fromOrden, String paradaAbordaje, Integer toOrden, String paradaBajada) {
+    }
+
+    /**
+     * US-138/US-141 y US-147: precio de la compra. subtotal es la suma del desglose por pasajero; total = subtotal -
+     * descuento del cupón (nunca negativo) y precioUnitario el promedio por asiento.
+     */
+    public void asignarTarifa(BigDecimal subtotal, BigDecimal descuentoCupon, UUID couponId, String cuponCodigo) {
+        BigDecimal descuento = descuentoCupon == null ? BigDecimal.ZERO : descuentoCupon.min(subtotal);
+        this.subtotal = subtotal;
+        this.descuentoCupon = descuento;
+        this.couponId = couponId;
+        this.cuponCodigo = cuponCodigo;
+        this.total = subtotal.subtract(descuento);
+        this.precioUnitario = subtotal.divide(BigDecimal.valueOf(getSeatNumbers().size()), 2, RoundingMode.HALF_UP);
+    }
+
+    /** US-150: en una reprogramación el subtotal es el pasaje nuevo; total es la diferencia que se cobra. */
+    public void asignarSubtotal(BigDecimal subtotal) {
+        this.subtotal = subtotal;
+    }
+
+    public void asignarTramo(Tramo tramo) {
+        if (tramo == null) {
+            return;
+        }
+        fromOrden = tramo.fromOrden();
+        toOrden = tramo.toOrden();
+        paradaAbordaje = tramo.paradaAbordaje();
+        paradaBajada = tramo.paradaBajada();
+    }
+
+    public void asignarRuta(UUID routeId) {
+        this.routeId = routeId;
+    }
+
+    /** Tramo de la reserva, o null si es el viaje completo. */
+    public Tramo getTramo() {
+        if (fromOrden == null && toOrden == null && paradaAbordaje == null && paradaBajada == null) {
+            return null;
+        }
+        return new Tramo(fromOrden, paradaAbordaje, toOrden, paradaBajada);
+    }
+
+    public BigDecimal getSubtotal() {
+        return subtotal;
+    }
+
+    public BigDecimal getDescuentoCupon() {
+        return descuentoCupon;
+    }
+
+    public UUID getCouponId() {
+        return couponId;
+    }
+
+    public String getCuponCodigo() {
+        return cuponCodigo;
+    }
+
+    public UUID getRouteId() {
+        return routeId;
+    }
+
+    public void asignarViaje(Viaje viaje) {
+        if (viaje == null) {
+            return;
+        }
+        origen = viaje.origen() != null ? viaje.origen() : origen;
+        destino = viaje.destino() != null ? viaje.destino() : destino;
+        fechaSalida = viaje.fechaSalida() != null ? viaje.fechaSalida() : fechaSalida;
+        empresaNombre = viaje.empresa() != null ? viaje.empresa() : empresaNombre;
+    }
+
+    /** US-139: cambia {@code desde} por {@code hacia} en los asientos de la reserva (conserva el orden). */
+    public void cambiarAsiento(String desde, String hacia, Instant now) {
+        List<String> asientos = new ArrayList<>(getSeatNumbers());
+        int i = asientos.indexOf(desde);
+        if (i < 0) {
+            throw new IllegalArgumentException("El asiento " + desde + " no es de la reserva " + id);
+        }
+        asientos.set(i, hacia);
+        this.seatNumbers = String.join(",", asientos);
+        this.actualizadoEn = now;
+    }
+
+    /** US-150: seat-inventory ya respondió a la anulación de los asientos viejos (no queda nada que reintentar). */
+    public void marcarAnulacionResuelta(Instant now) {
+        this.anulacionResueltaEn = now;
         this.actualizadoEn = now;
     }
 
@@ -186,8 +417,61 @@ public class Booking {
         return companyId;
     }
 
+    public UUID getOrigenBookingId() {
+        return origenBookingId;
+    }
+
+    /** Valor del pasaje ya pagado: en una reprogramación el acumulado de la cadena; si no, el total. */
+    public BigDecimal getValorPagado() {
+        return valorPagado != null ? valorPagado : total;
+    }
+
+    public Instant getAnulacionResueltaEn() {
+        return anulacionResueltaEn;
+    }
+
     public String getEmailContacto() {
         return emailContacto;
+    }
+
+    public String getOrigen() {
+        return origen;
+    }
+
+    public String getDestino() {
+        return destino;
+    }
+
+    public Instant getFechaSalida() {
+        return fechaSalida;
+    }
+
+    public String getEmpresaNombre() {
+        return empresaNombre;
+    }
+
+    public Canal getCanal() {
+        return canal;
+    }
+
+    public UUID getVendidoPor() {
+        return vendidoPor;
+    }
+
+    public String getCompradorNombre() {
+        return compradorNombre;
+    }
+
+    public String getCompradorEmail() {
+        return compradorEmail;
+    }
+
+    public String getCompradorTelefono() {
+        return compradorTelefono;
+    }
+
+    public Instant getUsuarioEliminadoEn() {
+        return usuarioEliminadoEn;
     }
 
     public Instant getCreadoEn() {

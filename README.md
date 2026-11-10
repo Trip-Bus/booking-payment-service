@@ -2,23 +2,42 @@
 
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=Trip-Bus_booking-payment-service&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=Trip-Bus_booking-payment-service)
 
-Orquesta la compra: datos del viajero, total, pago con tarjeta (sandbox), tiquete con QR,
-idempotencia y saga de compra con compensaciones.
+Orquesta la compra: datos del viajero, total, pago con tarjeta, PSE o Nequi (sandbox) o en efectivo en taquilla,
+tiquete con QR (y en PDF), idempotencia y saga de compra con compensaciones.
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Redis 7
 
-**HU:** US-031, US-032, US-033, US-034 · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
+**HU:** US-031, US-032, US-033, US-034, US-150, US-139, US-152, US-154, US-155, US-172, US-143, US-144, US-145,
+US-153, US-166 (lado de booking) · **Puerto:** 18004 · **BD:** `tripbus_booking` (puerto QA 18104)
 
 ## API
 
 | Método | Endpoint | Descripción |
 |---|---|---|
-| POST | `/bookings` `{holdId, pasajeros:[{nombre, tipoDocumento, numeroDocumento}]}` | Crea la reserva y calcula el total (Catalog o Flash Offers). |
+| POST | `/bookings` `{holdId, pasajeros:[{nombre, tipoDocumento, numeroDocumento, tipoPasajero?}], cupon?}` | Crea la reserva; el total lo calcula catalog por pasajero y tramo (**US-138/US-141/US-142**) menos el cupón (**US-147**). Ver "Cómo se calcula el total". |
+| GET | `/payments/{id}/receipt.pdf` · `/refunds/{id}/receipt.pdf` | **US-146**: comprobante de pago o de reembolso (dueño, OPERADOR de la empresa, ADMIN). |
+| POST · GET · PUT · DELETE | `/coupons` · `/coupons/{id}` | **US-147**: cupones (ADMIN: TripBus y cualquier empresa; OPERADOR: su empresa). |
 | POST | `/bookings/{id}/pay` + header **`Idempotency-Key`** `{cardToken, cardLast4}` | Inicia el pago (202). Reintentos con la misma llave devuelven la misma respuesta. |
 | GET | `/bookings` · `/bookings/{id}` · `/bookings/{id}/saga` | Mis reservas, detalle y bitácora de la saga. |
+| GET | `/bookings?scope=proximos\|pasados&page=0&size=10` | **US-145**: mis viajes próximos o pasados, paginado (ver abajo). |
+| POST | `/box-office/sales` + header **`Idempotency-Key`** `{itineraryId, seatNumbers, pasajeros, comprador:{nombre, email?, telefono?}}` | **US-144** (OPERADOR): venta en taquilla con pago en efectivo. 201 con la reserva `CONFIRMADA` y su tiquete. |
+| GET | `/box-office/sales?fecha=YYYY-MM-DD&vendedor=` | **US-144**: cierre de caja del día (OPERADOR: el suyo o el de otro vendedor de su empresa; ADMIN: todas). |
+| POST | `/tickets/{id}/resend` | **US-145**: reenvía el tiquete al correo de la reserva (202). Máximo 3 por día → `429 RESEND_LIMIT_REACHED`. |
+| GET | `/tickets/{id}/pdf` | **US-145**: tiquete en PDF con el QR, el viaje, los pasajeros y los asientos (dueño, OPERADOR de la empresa, ADMIN). |
+| POST | `/bookings/{id}/reschedule` `{holdId}` | **US-150** (dueño): reprograma a otro viaje con los asientos de la retención. 201 con la reserva nueva (`PENDIENTE_PAGO` si hay diferencia, `CONFIRMADA` si no); 200 si esa retención ya se usó para esto. |
 | GET | `/tickets/{id}` · `/tickets/{id}/qr.png` | Tiquete con QR firmado (data URI / PNG). |
 | POST | `/tickets/validate` `{qrCode}` | Validación al abordar (CONDUCTOR/OPERADOR/ADMIN). |
+| POST | `/tickets/{id}/seat` `{fromSeat, toSeat}` | **US-139** (dueño): cambia de asiento en el mismo viaje; el tiquete queda con QR nuevo. |
+| PATCH | `/tickets/{id}/passengers/{passengerId}` `{nombre, tipoDocumento, numeroDocumento}` | **US-152** (dueño): corrige el nombre o el documento de un pasajero, una sola vez. |
+| GET | `/bookings/affected` · `/bookings/{id}/affected` | **US-154**: mis reservas afectadas pendientes y el detalle (causa, opciones, plazo, decisión). |
+| POST | `/bookings/{id}/affected/reschedule` `{holdId}` · `/affected/refund` · `/affected/accept` | **US-154** (dueño): reprogramar gratis, reembolso o aceptar el nuevo horario. |
+| GET | `/itineraries/{id}/manifest` `?format=csv` | **US-172**: manifiesto de pasajeros (ADMIN, OPERADOR/CONDUCTOR de la empresa). |
+| GET | `/reports/sales?desde=&hasta=&agrupar=dia\|ruta\|metodo\|canal&companyId=` · `/reports/sales.csv` | **US-190**: ventas, ingresos y comisión de TripBus (OPERADOR: su empresa; ADMIN: todas o `companyId`). |
+| GET | `/reports/platform?mes=YYYY-MM` · `/reports/platform.csv` | **US-190** (ADMIN): facturación de TripBus del mes por empresa (cuota mensual + comisión). |
 | POST | `/webhooks/payment` | Webhook de la pasarela (firma `X-Signature` HMAC-SHA256, **sin JWT**). |
+
+`pasajeros[].passengerId` (en la reserva y en el tiquete) es el que usa el PATCH. `BookingResponse.origenBookingId`
+indica de qué reserva viene una reprogramación.
 
 ### Saga
 
@@ -26,6 +45,69 @@ idempotencia y saga de compra con compensaciones.
 `PAGO_RECHAZADO` (se libera la retención), `EXPIRADA` (la retención venció) o `REEMBOLSADA`
 (pago aprobado pero el asiento ya no se pudo confirmar). Cada paso queda en `saga_log`; un job
 retoma las sagas interrumpidas y otro concilia reservas/pagos/tiquetes cada 15 min.
+`CONFIRMADA → REPROGRAMADA` (US-150): se confirmó la reserva nueva que la reemplaza.
+En taquilla (US-144) la reserva recorre los mismos estados en un instante: el pago `EFECTIVO` se aprueba sin pasarela.
+
+Estados del tiquete:
+
+| Estado | Significado | Al abordar (`POST /tickets/validate`) |
+|---|---|---|
+| `EMITIDO` | Vigente, pendiente de abordar. | Válido una sola vez (pasa a `USADO`). |
+| `USADO` | Abordó. | `valido: false, motivo: YA_USADO`. |
+| `REPROGRAMADO` | Se cambió por el de una reserva nueva (US-150). | `409 TICKET_RESCHEDULED`. |
+| `ANULADO` | Reembolsado por un cambio de la empresa (US-154). | `409 TICKET_VOIDED`. |
+| `NO_SHOW` | El viaje salió hace más de 30 min y no abordó (US-153). Sin reembolso. | `valido: false, motivo: NO_SHOW`. |
+
+Un QR que un cambio de asiento reemplazó responde `valido: false, motivo: QR_REEMPLAZADO`.
+
+### Reprogramar el tiquete (US-150)
+
+Política: **no hay reembolso por decisión del pasajero**. El pasajero retiene los asientos del viaje nuevo con
+el `POST /seats/holds` normal y llama a `POST /bookings/{id}/reschedule {holdId}`. Se valida (409 con código):
+
+| Código | Regla |
+|---|---|
+| `BOOKING_NOT_RESCHEDULABLE` / `TICKET_NOT_RESCHEDULABLE` | La reserva debe estar `CONFIRMADA` y su tiquete `EMITIDO` (no usado) o `NO_SHOW` (US-153, ver abajo). |
+| `RESCHEDULE_WINDOW_CLOSED` | Deben faltar más de `tripbus.booking.reschedule-cutoff` (3 h) para la salida del viaje original. |
+| `OFFER_FARE_NOT_RESCHEDULABLE` · `503 OFFERS_UNAVAILABLE` | **US-166**: si la reserva es de oferta, flash-offers (`GET /internal/offers/{id}`) debe permitir reprogramar; si no responde, 503. |
+| `NO_SHOW_WINDOW_CLOSED` · `NO_SHOW_RESCHEDULE_DISABLED` | **US-153**: un no-show se reprograma dentro de la ventana y si la política está activa. |
+| `RESCHEDULE_LIMIT_REACHED` | Máximo `tripbus.booking.max-reschedules` (2) en toda la cadena de reprogramaciones. |
+| `RESCHEDULE_IN_PROGRESS` | Ya hay una reprogramación viva de esa reserva (también lo impide un índice único en la BD). |
+| `HOLD_NOT_OWNED` · `HOLD_NOT_ACTIVE` · `SEATS_PASSENGERS_MISMATCH` · `SAME_ITINERARY` · `HOLD_ALREADY_USED` | La retención es del mismo usuario, está activa, tiene un asiento por pasajero y es de otro viaje. |
+| `ITINERARY_NOT_AVAILABLE` · `ITINERARY_DEPARTED` · `ROUTE_MISMATCH` · `COMPANY_MISMATCH` · `CURRENCY_MISMATCH` | El viaje nuevo (catalog) no está cancelado, sale en el futuro, tiene el mismo origen y destino y es de la misma empresa. |
+
+Solo el dueño puede reprogramar o cambiar su tiquete: el OPERADOR (su empresa) y el ADMIN siguen consultando
+todo como siempre, pero las acciones les responden `403 NOT_BOOKING_OWNER` / `NOT_TICKET_OWNER`.
+
+Se crea una reserva nueva con `origen_booking_id`, los mismos pasajeros (con los asientos nuevos) y
+`total = max(0, pasaje nuevo − pasaje ya pagado) + tripbus.booking.reschedule-fee` (0 por defecto). El pasaje nuevo
+se calcula como siempre (catalog o flash-offers) y el pasaje ya pagado es el acumulado de la cadena
+(`bookings.valor_pagado`: si el viaje nuevo es más barato se conserva lo pagado). Con diferencia la reserva queda
+`PENDIENTE_PAGO` y se paga con el `POST /bookings/{id}/pay` de siempre; sin diferencia nace en `PAGO_APROBADO` y se
+confirma de inmediato sin pago. La reserva original no se toca hasta entonces: si la nueva expira o su pago se
+rechaza, sigue intacta.
+
+Al confirmarse la reserva nueva (`PaymentService.confirmAndIssue` + `RescheduleSaga`):
+
+1. ConfirmSale del hold nuevo en seat-inventory (`ASIENTO_VENDIDO`).
+2. En **una sola transacción**: el tiquete viejo pasa a `REPROGRAMADO` con un UPDATE condicional que compite con
+   el abordaje, la reserva vieja a `REPROGRAMADA`, se emite el tiquete nuevo con QR nuevo y la reserva nueva queda
+   `CONFIRMADA` (`REPROGRAMACION_APLICADA` / `REPROGRAMADA` en `saga_log`). El tiquete nuevo se envía por correo.
+   Así nunca quedan dos tiquetes válidos. Si el tiquete viejo ya se usó para abordar, la reprogramación no aplica:
+   se reembolsa (`REPROGRAMACION_NO_APLICABLE`) y se devuelven los asientos nuevos.
+3. Se anulan los asientos viejos con `POST /internal/sales/void` (motivo `REPROGRAMACION`): paso
+   `ANULAR_ASIENTOS_ANTERIORES` (`OK`, `REINTENTO` si seat-inventory no responde, `ERROR` si la rechaza). Las que
+   quedan pendientes (`anulacion_resuelta_en` nulo) las reintenta el job de recuperación de sagas.
+
+### Cambiar de asiento (US-139) y corregir datos del pasajero (US-152)
+
+- **Asiento:** tiquete `EMITIDO` y más de 30 min antes de la salida (`SEAT_CHANGE_WINDOW_CLOSED`). Llama a
+  seat-inventory `POST /internal/sales/swap` (sus 409, p. ej. `SEAT_UNAVAILABLE`, se devuelven tal cual) y, si
+  responde bien, actualiza el asiento del pasajero y `bookings.seat_numbers` en la misma transacción. El QR incluye
+  los asientos: se genera uno nuevo (nuevo `qr_token`, el viejo deja de validar) y se reenvía el tiquete por correo.
+- **Pasajero:** tiquete `EMITIDO` y más de 1 h antes de la salida (`PASSENGER_CHANGE_WINDOW_CLOSED`), una sola vez
+  por pasajero (`409 PASSENGER_ALREADY_CORRECTED`, lo garantiza `passenger_changes` con los valores anteriores y
+  nuevos, `hecho_por` y `creado_en`). El QR no incluye esos datos, así que se conserva.
 
 ### Pasarela sandbox
 
@@ -46,7 +128,234 @@ La pasarela puede reenviar el mismo webhook para demostrar la idempotencia (US-0
 probando que un webhook repetido no cobra ni emite dos veces) y **apagado en PROD**
 (`application-prod.yml`). Desde el IDE lo controla `PAYMENT_DUPLICATE_WEBHOOK` (por defecto `true`).
 
-**Publica:** `BookingCreated`, `PaymentApproved`, `PaymentFailed`, `TicketIssued`, `RefundProcessed`. **Consume:** `HoldExpired`.
+**Publica:** `BookingCreated`, `PaymentApproved`, `PaymentFailed`, `TicketIssued`, `RefundProcessed`,
+`TicketRescheduled` `{userId, bookingIdAnterior, bookingIdNuevo, ticketIdAnterior, ticketIdNuevo, itineraryIdAnterior,
+itineraryIdNuevo}` (US-150), `TicketUpdated` `{userId, bookingId, ticketId, cambio: ASIENTO | PASAJERO}` (US-139 con
+`fromSeat`/`toSeat`, US-152 con `passengerId`), `BookingAffected` `{userId, bookingId, ticketId, itineraryId, causa,
+plazoDecision, opciones}` (US-154) y `BookingRelocated` `{userId, bookingIdAnterior, bookingIdNuevo, ticketIdAnterior,
+ticketIdNuevo, itineraryIdAnterior, itineraryIdNuevo, seatNumbers}` (US-155).
+**Consume:** `HoldExpired` (seat-inventory), `ItineraryCancelled` e `ItineraryRescheduled` (catalog). Idempotente por
+`eventId`: `processed_events` se escribe en la misma transacción que el manejador, así un evento repetido no vuelve a
+afectar reservas ni a avisar al pasajero.
+
+### Política de reembolso
+
+**Solo hay reembolso cuando el pasajero no tiene la culpa**: la empresa canceló, reprogramó o retrasó (≥ umbral) el
+viaje. Por decisión propia no existe (reprogramar con US-150 nunca devuelve dinero). El reembolso solo se puede pedir
+sobre una reserva afectada (`/bookings/{id}/affected/refund`); sobre cualquier otra responde `404 BOOKING_NOT_AFFECTED`.
+Las otras devoluciones automáticas siguen siendo las de la saga de compra (asiento perdido tras el pago y aprobado
+tardío), que tampoco son culpa del pasajero.
+
+### Viajes afectados por la empresa (US-154) y decisión automática (US-155)
+
+| Evento de catalog | Causa | Afecta |
+|---|---|---|
+| `ItineraryCancelled` | `CANCELACION` | siempre |
+| `ItineraryRescheduled` tipo `REPROGRAMACION` | `REPROGRAMACION` | siempre |
+| `ItineraryRescheduled` tipo `RETRASO` | `RETRASO` | si `minutosDiferencia >= tripbus.booking.affected-delay-min` (60); un retraso menor no afecta a nadie |
+
+Quedan afectadas las reservas `CONFIRMADA` del viaje con tiquete `EMITIDO` (no usado): una fila en `affected_bookings`
+`PENDIENTE` con `plazo_decision = ahora + tripbus.booking.affected-decision-window` (24 h), un correo al pasajero (qué
+pasó, qué puede elegir y hasta cuándo; mismo SMTP que el tiquete) y el evento `BookingAffected`. Si la empresa vuelve
+a cambiar el viaje y la reserva sigue confirmada, se reabre con la causa nueva (una cancelación pendiente no se
+reemplaza por un cambio posterior).
+
+| Causa | Opciones del dueño |
+|---|---|
+| `CANCELACION` | reprogramar gratis o reembolso |
+| `REPROGRAMACION` / `RETRASO` | aceptar el nuevo horario, reprogramar gratis o reembolso |
+
+- **Aceptar** (`/accept`): el tiquete sigue válido con el nuevo horario → `ACEPTO_CAMBIO`. Con el viaje cancelado,
+  `409 OPTION_NOT_AVAILABLE`.
+- **Reprogramar gratis** (`/reschedule {holdId}`): el flujo de US-150 con diferencia 0 (sin cargo), sin el límite de
+  cambios ni el plazo de 3 h, con el mismo origen y destino y de cualquier empresa → `REPROGRAMADA` (`bookingNuevoId`).
+- **Reembolso** (`/refund`): devuelve con `PaymentGateway.refund` todo lo pagado en la cadena de reprogramaciones, una
+  sola vez (`refunds` es único por pago; repetirlo responde `200` con el mismo resultado). El tiquete pasa a `ANULADO`
+  y la reserva a `REEMBOLSADA` en la misma transacción; si el viaje no fue cancelado se anulan los asientos con
+  seat-inventory `/internal/sales/void` (motivo `REEMBOLSO`, se reintenta si no responde). Publica `RefundProcessed`.
+- Una reserva ya decidida responde `409 ALREADY_DECIDED`; con el plazo vencido, `409 DECISION_WINDOW_CLOSED` (decide
+  el sistema). Solo decide el dueño: OPERADOR (su empresa) y ADMIN consultan `/affected` pero reciben `403`.
+
+**Al vencer el plazo** (`AffectedBookingJob`, cada 5 min en un solo nodo con `LeaderLock`), `decidido_por = SISTEMA`:
+`REPROGRAMACION`/`RETRASO` → `ACEPTO_CAMBIO`. `CANCELACION` → busca en catalog (`/trips/search`, día por día) el
+siguiente viaje de la misma ruta y empresa que salga después del original y dentro de los 3 días siguientes con cupo
+para todos los pasajeros, retiene los primeros asientos disponibles (`GET /seats/itineraries/{id}` y
+`POST /internal/holds` a nombre del pasajero) y confirma con el flujo gratis → `REUBICADA` + `BookingRelocated`; si no
+hay cupo → reembolso automático (`REEMBOLSADA` + `RefundProcessed`). Si catalog o seat-inventory no responden no se
+concluye "sin cupo": se reintenta en la siguiente pasada. Si el pasajero ya resolvió por su cuenta (reprogramó con
+US-150 o abordó) se registra como su decisión. En todos los casos se le avisa por correo.
+
+### Manifiesto de pasajeros (US-172)
+
+`GET /itineraries/{id}/manifest` (`?format=csv` para CSV): ADMIN, y OPERADOR o CONDUCTOR de la empresa del viaje (claim
+`companyId`; la validación contra la asignación de fleet llega después). Otra empresa → `404 ITINERARY_NOT_FOUND`;
+otro rol → `403`. Por pasajero: nombre, tipo y número de documento, asiento, `bookingId`, estado del tiquete
+(`EMITIDO` = pendiente de abordar, `USADO` = abordó) y hora de abordaje; totales `vendidos`, `abordados` y
+`pendientes`. No incluye tiquetes `REPROGRAMADO` ni `ANULADO`. Es información personal: cada consulta (quién, rol,
+cuándo, qué viaje, formato y si se permitió) queda en `manifest_access_log`. El CSV escapa comas y comillas y
+antepone `'` a los valores que empiezan por `= + - @` (inyección de fórmulas).
+
+### Datos del viaje en la reserva
+
+Al crear la reserva (app, taquilla o reprogramación) se copian de catalog `origen`, `destino`, `fecha_salida` y
+`empresa_nombre`, junto con el `canal` (`APP` | `TAQUILLA`). Así "mis viajes", el cierre de caja y el job de no-show no
+consultan a catalog por cada reserva. Las reservas anteriores las rellena `TripDataBackfill` al arrancar (idempotente:
+solo las que no tienen `fecha_salida`); si catalog no responde, quedan para el siguiente arranque. `ItineraryRescheduled`
+actualiza `fecha_salida` de todas las reservas del viaje.
+
+### Venta en taquilla (US-144)
+
+`POST /box-office/sales` (solo OPERADOR, con `Idempotency-Key` igual que el pago: repetirla devuelve la misma venta y
+con otro cuerpo responde `422 IDEMPOTENCY_KEY_REUSED`):
+
+1. El viaje debe ser de la empresa del operador (si no, `404 ITINERARY_NOT_FOUND`), no estar cancelado
+   (`409 ITINERARY_CANCELLED`) ni haber salido (`409 ITINERARY_DEPARTED`). Un pasajero por asiento.
+2. Retiene los asientos en seat-inventory (`POST /internal/holds`) **a nombre del operador**.
+3. En una transacción: reserva `canal = TAQUILLA` con `vendido_por` (el operador) y los datos del comprador, y un pago
+   `EFECTIVO` aprobado al instante (sin pasarela). Luego confirma la venta en seat-inventory y emite el tiquete con el
+   mismo paso de la saga de la app. Cada paso queda en `saga_log` (`RESERVA_CREADA`, `PAGO_EFECTIVO_APROBADO`,
+   `ASIENTO_VENDIDO`, `TIQUETE_EMITIDO`). Si el asiento se perdió al confirmar, la reserva queda `REEMBOLSADA` (se
+   devuelve el efectivo; la pasarela no interviene).
+4. Si el correo del comprador es de un PASAJERO registrado (identity `GET /internal/users/by-email`), la reserva queda a
+   su nombre y aparece en sus viajes; si no (o identity no responde), queda a nombre del operador. Si dio correo, se le
+   envía el tiquete como en la app.
+
+El tiquete de taquilla se valida al abordar igual que uno de la app. `GET /box-office/sales?fecha=` (hoy por defecto,
+hora de Colombia) es el cierre de caja: ventas, tiquetes, asientos, `totalEfectivo` y `totalReembolsado`. El OPERADOR ve
+las suyas o, con `?vendedor=`, las de otro vendedor de su empresa; el ADMIN ve todas o las de `?vendedor=`.
+
+### Mis viajes, reenvío y PDF (US-145)
+
+`GET /bookings?scope=proximos|pasados` (paginado, `size` hasta 50): **próximos** son los de salida hoy (hora de Colombia)
+o después, de la más cercana a la más lejana; **pasados**, el resto, de la más reciente a la más vieja. Solo reservas
+`CONFIRMADA`, `REPROGRAMADA` y `REEMBOLSADA`, con su estado visible. Cada viaje trae origen, destino, salida, empresa,
+asientos, estado del tiquete, canal y si hoy se podría reprogramar (`puedeReprogramar`) o cambiar de asiento
+(`puedeCambiarAsiento`). La regla de la tarifa de oferta se valida con flash-offers al reprogramar.
+
+`POST /tickets/{id}/resend` reenvía el tiquete al correo de la reserva: máximo 3 por día (UPDATE atómico; el cuarto
+responde `429 RESEND_LIMIT_REACHED`). `409 TICKET_NOT_RESENDABLE` si está `REPROGRAMADO` o `ANULADO`,
+`409 NO_CONTACT_EMAIL` sin correo y `503 MAIL_UNAVAILABLE` sin SMTP. `GET /tickets/{id}/pdf` genera el PDF (OpenPDF,
+LGPL/MPL) con el número de tiquete, el QR, el viaje, los pasajeros y los asientos. Ambos solo para el dueño, el OPERADOR
+de la empresa del viaje y el ADMIN; para cualquier otro el tiquete no existe (404).
+
+### No-show (US-153)
+
+Cada 5 min, en un solo nodo, `NoShowJob` pasa a `NO_SHOW` los tiquetes `EMITIDO` de viajes que salieron hace más de
+`tripbus.booking.no-show-after` (30 min) y publica `TicketNoShow {userId, bookingId, ticketId, itineraryId}`. **No hay
+reembolso.** No aplica a reservas afectadas por la empresa pendientes de decisión ni a viajes cancelados. Un no-show se
+puede reprogramar con el flujo de US-150 si `tripbus.booking.no-show-reschedule-enabled` (true), dentro de
+`tripbus.booking.no-show-reschedule-window` (24 h) después de la salida, pagando la diferencia de precio más
+`tripbus.booking.no-show-fee-percent` (20 %) del total pagado. Un tiquete de oferta en no-show no se reprograma.
+
+### Tarifa de oferta (US-166, lado de booking)
+
+Al reprogramar (US-150 y no-show), si la reserva tiene `offer_id` se consulta flash-offers `GET /internal/offers/{id}`
+(con `X-Internal-Token`): `permiteReprogramar = false` → `409 OFFER_FARE_NOT_RESCHEDULABLE`; si flash-offers no responde
+→ `503 OFFERS_UNAVAILABLE`. Las reservas **afectadas por la empresa** (US-154) siempre se pueden reprogramar gratis o
+reembolsar, aunque sean de oferta: el pasajero no tiene la culpa.
+
+### Cómo se calcula el total (US-138, US-141 y US-142, Sprint 6)
+
+`POST /bookings` acepta por pasajero `tipoPasajero` (`ADULTO` por defecto, `NINO` o `ADULTO_MAYOR`) y toma de la
+retención de seat-inventory el tramo (`fromOrden`/`toOrden`; sin ellos = el viaje completo). El precio lo calcula
+**catalog** con `POST /internal/pricing` (`X-Internal-Token`):
+
+```json
+// pedido
+{"itineraryId": "…", "fromOrden": 2, "toOrden": 4,
+ "pasajeros": [{"asiento": "1", "tipoPasajero": "ADULTO"}, {"asiento": "2", "tipoPasajero": "NINO"}]}
+// respuesta (un precio por pasajero, en el mismo orden)
+{"itineraryId": "…", "estado": "PROGRAMADO", "moneda": "COP",
+ "tramo": {"fromOrden": 2, "paradaAbordaje": "Fusagasugá", "toOrden": 4, "paradaBajada": "Ibagué"},
+ "pasajeros": [{"asiento": "1", "tipoPasajero": "ADULTO", "categoriaAsiento": "VIP", "precioBase": 100000,
+                "descuentoTipo": 0, "recargoCategoria": 15000, "precio": 115000}, …]}
+```
+
+- `precio` de cada pasajero ya incluye el tramo, la temporada, el tipo de pasajero y el recargo por categoría de asiento.
+  Booking guarda el **desglose por pasajero** (tipo, categoría, precio base, descuento por tipo, recargo y precio).
+- **subtotal** = suma de los precios; **total** = subtotal − descuento del cupón (lo que se paga y sobre lo que se
+  calcula la comisión de TripBus).
+- Si catalog no responde (o responde incompleto): `503 PRICING_UNAVAILABLE` y la reserva **no se crea**. Si el viaje ya
+  no está `PROGRAMADO`: `409 ITINERARY_NOT_AVAILABLE`. Un `tipoPasajero` desconocido: `400`.
+- Una retención de **oferta relámpago** conserva el precio de la oferta para cada asiento (sin cupones).
+- La **reprogramación** (con los tipos de pasajero de la reserva original) y la **taquilla** (viaje completo) usan el
+  mismo cálculo. Reprogramar un tramo exige la misma parada de abordaje y de bajada (`409 SEGMENT_MISMATCH`).
+- **Tramo** (US-142): la reserva y el tiquete guardan la parada de abordaje y la de bajada (`tramo` en las
+  respuestas); el PDF y el correo del tiquete muestran "Sube en / Baja en"; el manifiesto agrupa a los pasajeros por
+  parada de abordaje (`porParada`, en el orden de la ruta) y marca dónde se baja cada uno (también en el CSV).
+
+### Cupones de descuento (US-147, Sprint 6)
+
+- **CRUD** en `/coupons` (`POST`, `GET ?companyId=`, `GET /{id}`, `PUT /{id}`, `DELETE /{id}` = desactivar): el ADMIN
+  administra los cupones de TripBus (`companyId` null, sirven en cualquier empresa) y los de cualquier empresa; el
+  OPERADOR solo los de su empresa (los demás responden 404 y pedir otra empresa responde 403).
+- Campos: `codigo` (único **sin distinguir mayúsculas**), `tipo` `PORCENTAJE` (hasta 100) o `VALOR`, `valor`,
+  `companyId`, `vigenteDesde`/`vigenteHasta`, `usosMaximos` y `usosPorUsuario` (null = sin límite), `compraMinima`,
+  `routeIds` (vacío = cualquier ruta) y `activo`.
+- `POST /bookings` acepta `cupon`. Se valida en este orden y cada regla tiene su error: no existe o inactivo `404
+  COUPON_NOT_FOUND`; tarifa de oferta `409 COUPON_NOT_COMBINABLE`; aún no vigente `409 COUPON_NOT_YET_VALID`; vencido
+  `409 COUPON_EXPIRED`; de otra empresa o de otra ruta `409 COUPON_NOT_APPLICABLE`; compra mínima `409
+  COUPON_MINIMUM_NOT_MET`; sin usos `409 COUPON_EXHAUSTED`; límite del usuario `409 COUPON_USER_LIMIT_REACHED`.
+- **Descuento**: porcentaje del subtotal (al peso más cercano) o valor fijo, nunca más que el subtotal. Se resta antes
+  del pago y queda en la reserva (`descuentoCupon`, `cuponCodigo`).
+- **Usos atómicos**: `UPDATE coupons SET usos = usos + 1 WHERE … AND usos < usos_maximos` en la misma transacción que
+  crea la reserva; con muchas compras simultáneas solo las primeras `usosMaximos` lo logran (las demás: `409
+  COUPON_EXHAUSTED`, y no se crea la reserva). Si la reserva **vence** o el pago se **rechaza**, el uso se libera.
+- Los reportes de ventas tienen la columna `descuentoCupones` (también en el CSV).
+
+### Comprobantes (US-146, Sprint 6)
+
+`GET /payments/{id}/receipt.pdf` (pago aprobado; si no, `409 RECEIPT_NOT_AVAILABLE`) y `GET /refunds/{id}/receipt.pdf`:
+número de comprobante consecutivo (`TB-00000001`, compartido por pagos y reembolsos y fijo desde la primera vez),
+fecha (hora de Colombia), empresa y NIT (de catalog `GET /internal/companies/{id}`; si no lo trae, solo el nombre),
+método de pago con los últimos 4 dígitos, desglose por pasajero, cupón aplicado y total. **No** muestra la comisión.
+Solo el dueño de la reserva, el OPERADOR de su empresa y el ADMIN; los demás reciben 404.
+
+### Comisión de TripBus (US-190)
+
+Modelo de negocio: cada empresa paga una **cuota mensual** y una **comisión por tiquete**; ambas condiciones viven en
+catalog con su vigencia (`GET /internal/companies/{companyId}?fecha=YYYY-MM-DD`, con `X-Internal-Token`).
+
+- **Venta** = pago que queda `APROBADO` (app con cualquier método, taquilla en efectivo o la diferencia de una
+  reprogramación). Se guarda `payments.aprobado_en` (fecha de la venta).
+- **Comisión de la venta**: después del commit y en segundo plano se consulta a catalog la comisión **vigente en la
+  fecha de la venta** (hora de Colombia) y se guardan `comision_porcentaje` (0 a 30) y `comision_valor` = monto ×
+  porcentaje / 100, **redondeado al peso más cercano**. Un cambio posterior de las condiciones no toca las ventas ya
+  registradas.
+- **Catalog caído**: la venta **no se frena**; la comisión queda en null y `CommissionJob` la completa cada 15 min.
+  El mismo job corre **al arrancar** (idempotente) y completa las ventas anteriores a este cambio con la vigencia de su
+  fecha (`tripbus.booking.commission-backfill-enabled`, por defecto `true`).
+- **Reversión**: al reembolsar una venta (aprobado tardío, asiento perdido, viaje afectado...) el reembolso registra la
+  comisión en negativo (`refunds.comision_valor`); si la comisión llega después del reembolso, el job también la
+  revierte. En los reportes la comisión de una venta reembolsada es **0**. Un aprobado tardío (la pasarela aprueba un
+  pago que ya se dio por fallido) cuenta como venta y su reembolso la revierte.
+
+### Reportes de ventas e ingresos (US-190)
+
+`GET /reports/sales?desde=YYYY-MM-DD&hasta=YYYY-MM-DD&agrupar=dia|ruta|metodo|canal` (fechas de Colombia, ambas
+incluidas, máximo 366 días; `agrupar` por defecto `dia`). OPERADOR: solo su empresa (pedir otra con `companyId` →
+`403 FORBIDDEN_COMPANY`); ADMIN: todas o la de `?companyId=`. Por grupo y en `totales`, en COP enteros:
+
+| Campo | Qué es |
+|---|---|
+| `tiquetesVendidos` | Asientos de las ventas no reembolsadas (la diferencia de una reprogramación no es un tiquete nuevo). |
+| `ingresosBrutos` | Suma de las ventas del rango. |
+| `reembolsos` | Lo reembolsado de esas ventas (se cuenta en la fecha de la venta). |
+| `ingresosNetos` | Brutos − reembolsos. |
+| `comisionTripBus` | Comisión de las ventas no reembolsadas. |
+| `netoEmpresa` | Netos − comisión. |
+| `ocupacionPromedio` | Solo con `agrupar=ruta`: promedio de `porcentajeOcupacion` de esos viajes (seat-inventory `GET /internal/occupancy`, en bloques de 200). `null` si seat-inventory no responde; el reporte carga igual. |
+
+`ventasSinComision` cuenta las ventas cuya comisión aún no se registró. `GET /reports/sales.csv` devuelve lo mismo en
+CSV (con la fila `TOTAL` al final).
+
+`GET /reports/platform?mes=YYYY-MM` (solo ADMIN): por empresa, la **cuota mensual vigente el primer día del mes**
+(catalog), la comisión de las ventas del mes, el **total a cobrar** (cuota + comisión) y los tiquetes; al final el
+total de la plataforma. Aparecen todas las empresas con reservas aunque no hayan vendido ese mes (pagan la cuota). Si
+catalog no da la cuota de una empresa, `cuotaMensual` y `totalACobrar` quedan `null` e `incompleto = true`. También
+en CSV con `/reports/platform.csv`.
+
+Todo se calcula con consultas agregadas en SQL (índices por fecha de aprobación y estado, por empresa y por reserva).
 
 ## Flujo de ramas y entornos
 
@@ -159,7 +468,9 @@ no arranca y dice cuáles faltan (`RequiredSecretsCheck`).
 
 Opcionales con valor por defecto: `SERVER_PORT` (18004), `DB_HOST` (localhost), `DB_PORT` (18104),
 `DB_NAME` (tripbus_booking), `DB_USERNAME` (booking), `DB_POOL_SIZE`, `REDIS_HOST` (localhost),
-`REDIS_PORT` (18100), `PAYMENT_DUPLICATE_WEBHOOK` (solo IDE; en qa/prod lo fija el perfil).
+`REDIS_PORT` (18100), `PAYMENT_DUPLICATE_WEBHOOK` (solo IDE; en qa/prod lo fija el perfil), `IDENTITY_URL`
+(`http://localhost:18001`; si identity no responde, la venta en taquilla queda a nombre del operador),
+`NO_SHOW_RESCHEDULE_ENABLED` (true) y `TRIP_BACKFILL_ENABLED` (true).
 `DB_HOST` reemplaza a la antigua `DB_URL`.
 
 Tiquete por correo (US-033, opcionales en todos los entornos): `MAIL_HOST` (vacío = envío
@@ -184,10 +495,43 @@ no usa JWT: se autentica con la firma HMAC del header `X-Signature`.
 - `/actuator/info`: versión y fecha del build, y `app.commit` (el commit con el que se construyó la imagen).
 - Cada petición lleva un `requestId`: se reutiliza el header `X-Request-Id` (lo manda el API Gateway)
   o se genera uno, y se devuelve en la respuesta. Booking lo **propaga** en sus llamadas salientes a
-  seat-inventory, catalog y flash-offers, así una petición se sigue entre servicios. Logs legibles con
-  `[requestId]` en IDE/QA y JSON (con `requestId` y `"service":"booking-payment-service"`) en PROD.
+  seat-inventory, catalog y flash-offers, así una petición se sigue entre servicios.
 - El log de acceso solo registra método, ruta, estado y duración: nunca cuerpos de petición (no se
   registran datos de pago).
+
+### Trazas, logs y métricas (HT-10, Sprint 5)
+
+| Variable | Por defecto | Qué hace |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (vacía) | Exporta las trazas por OTLP/HTTP a `{endpoint}/v1/traces`. Vacía = no se exportan (siguen los `traceId`/`spanId` en los logs). |
+| `TRACING_SAMPLING` | `0.1` | Fracción de trazas muestreadas. |
+| `LOG_FORMAT` | texto (`json` en `prod`) | `json` = logs estructurados ECS (`logging.structured.format.console=ecs`). |
+| `OPENAPI_SERVER_URL` | (vacía) | Servidor que declara el documento OpenAPI (p. ej. el API Gateway) para que "Try it out" pase por él. |
+
+- **Trazas** (Micrometer Tracing sobre OpenTelemetry): cada petición es un span; el contexto (`traceparent`, W3C)
+  viaja en los RestClient (seat-inventory, catalog, flash-offers, identity), en los eventos de Redis Streams (campo
+  `traceparent`; el consumidor procesa cada evento en un span hijo) y en el webhook de la pasarela simulada (sale en
+  otro hilo pero sigue en la traza del cobro).
+- **Logs**: cada línea lleva `requestId`, `traceId`, `spanId` y `bookingId` cuando la petición (`/bookings/{id}/...`),
+  el evento o el paso de la saga es de una reserva. En texto: `[requestId] [bookingId] [traceId,spanId]`; en ECS, campos
+  con esos nombres. Nunca números de documento, teléfonos ni correos completos (los correos van enmascarados).
+- **Métricas de negocio** (`/actuator/prometheus`, tag `application=booking-payment-service`):
+
+| Métrica | Etiquetas |
+|---|---|
+| `tripbus_pagos_total` | `metodo` (TARJETA, PSE, NEQUI, EFECTIVO), `resultado` (aprobado, rechazado, monto_incorrecto, aprobado_tardio, pasarela_no_disponible, sin_respuesta) |
+| `tripbus_reembolsos_total` | `causa` (asiento_no_confirmado, aprobado_tardio, afectada_por_la_empresa, reprogramacion_no_aplicable...) |
+| `tripbus_sagas_recuperadas_total` | — (sagas que retomó o cerró `SagaRecoveryJob`) |
+| `tripbus_tiquetes_emitidos_total` | `canal` (APP, TAQUILLA) |
+| `tripbus_pago_hasta_tiquete_segundos` | Timer desde el pago hasta el tiquete; en Prometheus `tripbus_pago_hasta_tiquete_segundos_seconds_count/_sum/_max` |
+
+### Datos de un usuario eliminado (US-131, Sprint 5)
+
+Con el evento `UserDeleted {userId}` de identity, en las reservas del usuario se borran `email_contacto` y los datos
+del comprador de taquilla (nombre, correo y teléfono) y se marca `usuario_eliminado_en`. Se conservan el nombre y el
+documento de los pasajeros (manifiesto y contabilidad); solo se anonimizan los de reservas que nunca se pagaron
+(`PAGO_RECHAZADO` o `EXPIRADA`). Sus reservas futuras siguen válidas, pero sin correo el tiquete ya no se envía ni se
+reenvía (`409 NO_CONTACT_EMAIL`). Idempotente por `eventId`.
 
 ## Pruebas
 
@@ -202,6 +546,45 @@ mvn -B verify      # unitarias + integración con PostgreSQL y Redis reales (Tes
   reales y prueba la saga con los otros servicios simulados: 5 reintentos concurrentes = 1 cobro,
   webhook duplicado = 1 tiquete, pago rechazado libera la retención, asiento perdido ⇒ reembolso,
   firma inválida ⇒ 401 registrado en `webhook_log`.
+- `RescheduleIT` (Sprint 3, mismo montaje): reprogramar con diferencia (se paga y reemplaza el tiquete), sin
+  diferencia (se confirma sin pago ni reembolso) y con la retención equivocada; fuera de plazo y límite de cambios
+  de toda la cadena; la anulación de asientos falla y el job la recupera; nunca quedan dos tiquetes válidos (también
+  si se aborda con el viejo antes de pagar o con dos reprogramaciones simultáneas); pago rechazado deja intacta la
+  original; cambio de asiento con QR nuevo y con conflicto en seat-inventory; corrección del pasajero repetida.
+  Las reglas una a una están en `RescheduleServiceTest`, `RescheduleSagaTest` y `TicketChangeServiceTest`.
+- `AffectedIT` (Sprint 3, con el consumidor del stream encendido): evento repetido (mismo `eventId`) que afecta y avisa
+  una sola vez; retraso menor al umbral; aceptar, reprogramar gratis y reembolso; doble reembolso concurrente (un solo
+  cobro devuelto); sin cambio de la empresa no hay reembolso; plazo vencido de un retraso, de una cancelación con cupo
+  (reubicación) y sin cupo (reembolso, y sin catalog sigue pendiente); manifiesto por rol, CSV, otra empresa → 404 y
+  registro de accesos. Las reglas una a una están en `AffectedBookingServiceTest`, `AffectedRefundServiceTest`,
+  `AffectedBookingJobTest`, `ManifestServiceTest` y `AffectedMailServiceTest`.
+- `TaquillaYMisViajesIT` (Sprint 4, con SMTP en memoria): venta en taquilla con y sin cuenta del comprador, de otra
+  empresa, cancelada o que ya salió, `Idempotency-Key` repetida, efectivo devuelto sin pasarela y cierre de caja por
+  vendedor; mis viajes próximos y pasados; reenvío por encima del límite; PDF con el número de tiquete; no-show por el
+  job; reprogramar un no-show dentro y fuera de plazo; oferta no reprogramable (y sin flash-offers) y afectada de
+  oferta que sí se puede; relleno de los datos del viaje. Las reglas una a una están en `BoxOfficeServiceTest`,
+  `MyTripsServiceTest`, `TicketDocumentServiceTest`, `NoShowJobTest`, `RescheduleServiceTest` y `ClientesSprint4Test`.
+- `ReportesYComisionIT` (US-190, catalog y seat-inventory simulados): comisión con la vigencia de la fecha de la venta
+  en Colombia y redondeo al peso; un cambio de vigencia no altera ventas pasadas; catalog caído y el job que completa;
+  reembolso que revierte (antes y después de registrar la comisión); cada agrupación con sus totales, ocupación por
+  ruta (también caída y en bloques de 200); CSV; otra empresa; facturación de la plataforma solo para ADMIN. La
+  comisión por webhook y la del aprobado tardío están en `BookingSagaIT`; las reglas una a una en `ComisionUnitTest`
+  y `ReportControllerTest`.
+- `ObservabilidadYUsuarioEliminadoIT` (Sprint 5, con la observabilidad encendida y el consumidor del stream activo):
+  `UserDeleted` borra el contacto y los datos del comprador, conserva los pasajeros de los viajes, anonimiza los de las
+  reservas no pagadas, el tiquete ya no se reenvía y el evento repetido no se vuelve a procesar; el `traceparent` viaja
+  en el evento (el consumidor sigue la misma traza y pone el `bookingId` en el MDC), en los RestClient y en el webhook
+  de la pasarela simulada; cada línea de log lleva requestId, bookingId, traceId y spanId (texto o ECS); las métricas
+  de negocio salen en Prometheus. Las piezas una a una en `ObservabilidadUnitTest`, `ObservabilidadEnvironmentTest` y
+  `EventConsumerTest`; las métricas de los flujos reales en `BookingSagaIT` y `SagaRecoveryJobTest`.
+- `TarifasCuponesYComprobantesIT` (Sprint 6): precio con tipos de pasajero y categorías de asiento; catalog caído (503,
+  sin reserva); tramo en la reserva, el tiquete, el PDF y el manifiesto (agrupado por parada); comprobantes de pago y de
+  reembolso (número consecutivo, NIT, últimos 4, cupón, sin comisión, acceso por rol) y pago sin aprobar; cupón vencido,
+  aún no vigente, de otra empresa, de otra ruta, con compra mínima, agotado, por usuario y con oferta; uso liberado al
+  vencer y al rechazarse el pago; **50 hilos con un cupón de 10 usos (exactamente 10 lo logran)**; CRUD por rol;
+  comisión sobre lo pagado y descuento en los reportes. Las reglas una a una en `TarifasYCuponesUnitTest`,
+  `CatalogPricingTest` y `ReceiptServiceTest`. Las IT anteriores simulan `/internal/pricing` desde el precio base del
+  viaje (`support/PreciosDePrueba`).
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -219,10 +602,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-12) | Mínimo |
+| Métrica | Medido (2026-11-05) | Mínimo |
 |---|---|---|
-| Líneas | 74,0 % | `jacoco.minimo.lineas` = 0.70 |
-| Ramas | 61,2 % | `jacoco.minimo.ramas` = 0.60 |
+| Líneas | 97,0 % | `jacoco.minimo.lineas` = 0.95 |
+| Ramas | 91,5 % | `jacoco.minimo.ramas` = 0.90 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
@@ -231,8 +614,9 @@ actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para sub
 
 Fuera de la cobertura (mismas en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está lo que no tiene lógica: `BookingApplication`, los records de `web/dto` (ninguno tiene métodos),
-las entidades JPA de solo constructor/getters (`Passenger`, `Refund`, `SagaLogEntry`, `Ticket`,
-`WebhookLog`, `ProcessedEvent`) y `config/OpenApiConfig`. `Booking`, `Payment`, `IdempotencyKey`,
+los records `repository/ManifestRow`, las entidades JPA de solo constructor/getters (`Passenger`, `PassengerChange`,
+`ManifestAccessLog`, `SagaLogEntry`, `Ticket`,
+`WebhookLog`, `ProcessedEvent`) y `config/OpenApiConfig`. `Booking`, `Payment`, `Refund` (revierte la comisión), `IdempotencyKey`,
 `BookingProperties` y `PaymentProperties` tienen lógica y **sí** cuentan.
 
 ### Vulnerabilidades aceptadas (`.trivyignore.yaml`)
@@ -242,7 +626,9 @@ arreglo en Spring Boot 3.x** (hoy CVE-2026-47884 y CVE-2026-47890 de `spring-web
 corrigen en Spring Framework 7); cada una explica en `statement` por qué no aplica a este servicio
 (no usa XsltView ni SSE). Todas **vencen el 2027-01-31** (`expired_at`): desde esa fecha Trivy vuelve a fallar si no
 se migró a Spring Boot 4.1. Lo que sí tiene parche nunca se agrega aquí: se corrige subiendo la
-versión (ver las propiedades `*.version` de parches de seguridad en `pom.xml`).
+versión (ver las propiedades `*.version` de parches de seguridad en `pom.xml`). Los paquetes de Alpine de la
+imagen de ejecución se actualizan con `apk upgrade --no-cache` en el `Dockerfile`, así un parche publicado después
+de la imagen base (p. ej. CVE-2026-111497 de `brotli-libs`) entra en el siguiente build.
 
 El análisis de Sonar solo corre en `develop` (push y PR con base `develop`, ver
 [Flujo de ramas y entornos](#flujo-de-ramas-y-entornos)) y si el repo tiene el secreto `SONAR_TOKEN`;
@@ -273,3 +659,12 @@ docker build -t booking-payment-service:local . && \
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src" aquasec/trivy:0.70.0 \
   image --severity CRITICAL,HIGH --ignore-unfixed --ignorefile /src/.trivyignore.yaml booking-payment-service:local
 ```
+# Pagos sandbox (US-143)
+
+`POST /bookings/{id}/pay` conserva el cuerpo histórico de tarjeta (`cardToken`, `cardLast4`, `cardBrand`) y ahora acepta `metodo` (`TARJETA`, `PSE` o `NEQUI`). Incluya siempre `Idempotency-Key`.
+
+- Tarjeta: `tok_visa_approved` aprueba y `tok_visa_declined` rechaza.
+- Nequi: `{"metodo":"NEQUI","nequi":{"telefono":"3991111111"}}` aprueba; `3992222222` rechaza y cualquier otro celular colombiano de 10 dígitos genera error. La respuesta queda pendiente mientras se acepta en la app.
+- PSE: consulte `GET /payments/pse/banks`; use el banco `1` para aprobar o `2` para rechazar. Envíe `pse` con `bancoCodigo`, `tipoPersona` (`NATURAL`/`JURIDICA`), `tipoDocumento` y `numeroDocumento`. La respuesta devuelve `redirectUrl`; la página sandbox permite completar el pago y vence a los 10 minutos.
+
+El sandbox no guarda números de tarjeta, teléfonos ni documentos completos: solo últimos cuatro dígitos y, para PSE, el nombre del banco. Para conectar Wompi, PayU u otra pasarela se implementa `PaymentGateway`; la saga, el webhook firmado y los reembolsos no requieren cambios ni llaves de proveedor en este proyecto.

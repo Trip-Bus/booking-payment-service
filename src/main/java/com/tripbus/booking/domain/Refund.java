@@ -31,7 +31,18 @@ public class Refund {
     @Column(name = "creado_en", nullable = false)
     private Instant creadoEn;
 
+    /** US-190: comisión de la venta revertida, en negativo; null si la venta aún no tenía comisión (la completa el job). */
+    @Column(name = "comision_valor")
+    private BigDecimal comisionValor;
+
     protected Refund() {
+    }
+
+    /** Reembolso de una venta: revierte su comisión de TripBus (queda en negativo). */
+    public static Refund de(Payment payment, BigDecimal monto, String motivo, Instant now) {
+        Refund refund = new Refund(payment.getId(), monto, motivo, now);
+        refund.comisionValor = payment.getComisionValor() != null ? payment.getComisionValor().negate() : null;
+        return refund;
     }
 
     public Refund(UUID paymentId, BigDecimal monto, String motivo, Instant now) {
@@ -53,5 +64,17 @@ public class Refund {
 
     public BigDecimal getMonto() {
         return monto;
+    }
+
+    public BigDecimal getComisionValor() {
+        return comisionValor;
+    }
+
+    public String getMotivo() {
+        return motivo;
+    }
+
+    public Instant getCreadoEn() {
+        return creadoEn;
     }
 }

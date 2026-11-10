@@ -59,6 +59,12 @@ management:
   metrics:
     tags:
       application: booking-payment-service
+  # HT-10: trazas con Micrometer Tracing (OpenTelemetry). Se exportan por OTLP solo si OTEL_EXPORTER_OTLP_ENDPOINT
+  # tiene valor (config.ObservabilidadEnvironment); el contexto viaja en los RestClient, en los eventos de Redis
+  # Streams (campo traceparent) y en el webhook de la pasarela simulada.
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING:0.1}
   info:
     env:
       enabled: true
@@ -72,7 +78,18 @@ info:
   app:
     commit: ${APP_COMMIT:local}
 
+# Logs: texto legible por defecto con requestId, bookingId (cuando la petición o el evento es de una reserva),
+# traceId y spanId en cada línea. Con LOG_FORMAT=json se usa ECS (una línea JSON por evento con el MDC; ver
+# config.ObservabilidadEnvironment). Nunca se registran documentos, teléfonos ni correos completos.
+logging:
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}){faint} %clr(%5p) %clr([%X{requestId:-}]){magenta} %clr([%X{bookingId:-}]){yellow} %clr([%X{traceId:-},%X{spanId:-}]){blue} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%wEx"
+
 tripbus:
+  # Swagger del API Gateway: con OPENAPI_SERVER_URL (p. ej. http://localhost:18000) "Try it out" va por el
+  # gateway. Vacío = el servidor desde el que se abre Swagger.
+  openapi:
+    server-url: ${OPENAPI_SERVER_URL:}
   internal-token: ${INTERNAL_API_TOKEN:tripbus_internal_qa_token}
   events:
     enabled: ${EVENTS_ENABLED:true}
@@ -86,6 +103,27 @@ tripbus:
     flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:18006}
     idempotency-ttl: 24h
     ticket-secret: ${TICKET_SECRET:tripbus_ticket_qa_secret}
+    # US-150: reprogramar el tiquete. Sin reembolso por decisión del pasajero: si el viaje nuevo es más barato
+    # no se devuelve la diferencia.
+    reschedule-cutoff: 3h
+    max-reschedules: 2
+    reschedule-fee: 0
+    # US-154/US-155: reservas afectadas por la empresa. Un retraso afecta si es de al menos affected-delay-min
+    # minutos; el pasajero tiene affected-decision-window para elegir (después decide el sistema).
+    affected-delay-min: 60
+    affected-decision-window: 24h
+    # US-144: identity dice si el comprador en taquilla tiene cuenta (por su correo). Opcional: si no responde,
+    # la venta queda a nombre del operador.
+    identity-url: ${IDENTITY_URL:http://localhost:18001}
+    # US-153: un tiquete EMITIDO pasa a NO_SHOW cuando el viaje salió hace más de no-show-after. Se puede
+    # reprogramar dentro de no-show-reschedule-window después de la salida, con un cargo de no-show-fee-percent
+    # del total pagado (además de la diferencia de precio). Los de oferta no.
+    no-show-after: 30m
+    no-show-reschedule-enabled: ${NO_SHOW_RESCHEDULE_ENABLED:true}
+    no-show-reschedule-window: 24h
+    no-show-fee-percent: 20
+    # US-145: al arrancar se rellenan los datos del viaje de las reservas que aún no los tienen.
+    trip-backfill-enabled: ${TRIP_BACKFILL_ENABLED:true}
   payment:
     webhook-url: ${PAYMENT_WEBHOOK_URL:http://localhost:18004/webhooks/payment}
     webhook-secret: ${PAYMENT_WEBHOOK_SECRET:tripbus_webhook_qa_secret}
@@ -93,6 +131,10 @@ tripbus:
     # Simula a la pasarela reenviando el mismo webhook (US-034: no debe cobrar ni emitir dos veces).
     # application-qa.yml lo fija en true y application-prod.yml en false.
     duplicate-webhook: ${PAYMENT_DUPLICATE_WEBHOOK:true}
+    nequi-delay: ${PAYMENT_SANDBOX_NEQUI_DELAY:5s}
+    pse-timeout: ${PAYMENT_SANDBOX_PSE_TIMEOUT:10m}
+    sandbox-pages-enabled: ${PAYMENT_SANDBOX_PAGES_ENABLED:true}
+    frontend-url: ${FRONTEND_URL:http://localhost:5173}
   # US-033: el tiquete se envía por correo con el QR adjunto. Sin MAIL_HOST el envío queda deshabilitado
   # (un WARN al arrancar); no es una variable obligatoria en ningún entorno.
   mail:

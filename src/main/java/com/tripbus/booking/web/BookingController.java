@@ -4,10 +4,15 @@ import com.tripbus.booking.common.security.CurrentUser;
 import com.tripbus.booking.service.BookingService;
 import com.tripbus.booking.service.BookingViewer;
 import com.tripbus.booking.service.IdempotencyService;
+import com.tripbus.booking.service.MyTripsService;
 import com.tripbus.booking.service.PaymentService;
+import com.tripbus.booking.service.RescheduleService;
 import com.tripbus.booking.web.dto.BookingResponse;
 import com.tripbus.booking.web.dto.CreateBookingRequest;
+import com.tripbus.booking.web.dto.MyTripResponse;
+import com.tripbus.booking.web.dto.PageResponse;
 import com.tripbus.booking.web.dto.PayRequest;
+import com.tripbus.booking.web.dto.RescheduleRequest;
 import com.tripbus.booking.web.dto.SagaStepResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -19,6 +24,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -31,12 +37,17 @@ public class BookingController {
     private final BookingService bookingService;
     private final PaymentService paymentService;
     private final IdempotencyService idempotencyService;
+    private final RescheduleService rescheduleService;
+    private final MyTripsService myTripsService;
 
     public BookingController(BookingService bookingService, PaymentService paymentService,
-                             IdempotencyService idempotencyService) {
+                             IdempotencyService idempotencyService, RescheduleService rescheduleService,
+                             MyTripsService myTripsService) {
+        this.myTripsService = myTripsService;
         this.bookingService = bookingService;
         this.paymentService = paymentService;
         this.idempotencyService = idempotencyService;
+        this.rescheduleService = rescheduleService;
     }
 
     /** US-031: crea la reserva con los datos del viajero y devuelve el total a pagar. */
@@ -53,6 +64,18 @@ public class BookingController {
         return bookingService.mine(CurrentUser.id(authentication));
     }
 
+    /**
+     * US-145: mis viajes próximos (salida hoy o después, hora de Colombia; ascendente) o pasados (descendente).
+     * Solo CONFIRMADA, REPROGRAMADA y REEMBOLSADA. Paginado (page desde 0, size hasta 50).
+     */
+    @GetMapping(params = "scope")
+    public PageResponse<MyTripResponse> myTrips(@RequestParam String scope,
+                                                @RequestParam(defaultValue = "0") int page,
+                                                @RequestParam(defaultValue = "10") int size,
+                                                Authentication authentication) {
+        return myTripsService.list(CurrentUser.id(authentication), MyTripsService.scope(scope), page, size);
+    }
+
     @GetMapping("/{id}")
     public BookingResponse get(@PathVariable UUID id, Authentication authentication) {
         return bookingService.get(id, BookingViewer.of(authentication));
@@ -64,6 +87,18 @@ public class BookingController {
         return bookingService.sagaLog(id, BookingViewer.of(authentication));
     }
 
+    /**
+     * US-150: reprograma la reserva a otro viaje con los asientos de la retención {holdId}. 201 con la reserva
+     * nueva (PENDIENTE_PAGO si hay diferencia, CONFIRMADA si no); 200 si esa retención ya se usó para esto.
+     */
+    @PostMapping("/{id}/reschedule")
+    public ResponseEntity<BookingResponse> reschedule(@PathVariable UUID id, @Valid @RequestBody RescheduleRequest request,
+                                                      Authentication authentication) {
+        BookingService.CreateResult result = rescheduleService.reschedule(id, request.holdId(),
+                BookingViewer.of(authentication), CurrentUser.email(authentication));
+        return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK).body(result.booking());
+    }
+
     /** US-032 + US-034: pago con tarjeta. Requiere el header Idempotency-Key. */
     @PostMapping("/{id}/pay")
     public ResponseEntity<Object> pay(@PathVariable UUID id,
@@ -71,8 +106,8 @@ public class BookingController {
                                       @Valid @RequestBody PayRequest request,
                                       Authentication authentication) {
         UUID userId = CurrentUser.id(authentication);
-        String requestHash = IdempotencyService.hash(id.toString(), request.cardToken(), request.cardLast4(),
-                request.cardBrand());
+        String requestHash = IdempotencyService.hash(id.toString(), request.method(), request.cardToken(), request.cardLast4(),
+                request.cardBrand(), String.valueOf(request.pse()), String.valueOf(request.nequi()));
         return idempotencyService.execute(userId, idempotencyKey, requestHash, () ->
                 ResponseEntity.status(HttpStatus.ACCEPTED).body(paymentService.pay(id, userId, request, idempotencyKey)));
     }

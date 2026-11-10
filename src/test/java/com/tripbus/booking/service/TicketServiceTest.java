@@ -7,8 +7,13 @@ import com.tripbus.booking.domain.Ticket;
 import com.tripbus.booking.repository.BookingRepository;
 import com.tripbus.booking.repository.PassengerRepository;
 import com.tripbus.booking.repository.TicketRepository;
+import com.tripbus.booking.common.error.ApiException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpStatus;
 
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -21,7 +26,9 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -57,7 +64,7 @@ class TicketServiceTest {
 
     @Test
     void primerEscaneoMarcaElTiqueteComoUsado() throws Exception {
-        when(tickets.marcarUsado(ticket.getId(), AHORA, validador)).thenReturn(1);
+        when(tickets.marcarUsado(ticket.getId(), ticket.getQrToken(), AHORA, validador)).thenReturn(1);
         poner(ticket, "estado", "USADO");
         poner(ticket, "usadoEn", AHORA);
         when(tickets.findById(ticket.getId())).thenReturn(Optional.of(ticket));
@@ -72,7 +79,7 @@ class TicketServiceTest {
     @Test
     void segundoEscaneoDiceYaUsadoConLaFechaDeUso() throws Exception {
         Instant antes = AHORA.minusSeconds(60);
-        when(tickets.marcarUsado(ticket.getId(), AHORA, validador)).thenReturn(0);
+        when(tickets.marcarUsado(ticket.getId(), ticket.getQrToken(), AHORA, validador)).thenReturn(0);
         poner(ticket, "estado", "USADO");
         poner(ticket, "usadoEn", antes);
         when(tickets.findById(ticket.getId())).thenReturn(Optional.of(ticket));
@@ -83,17 +90,64 @@ class TicketServiceTest {
 
     @Test
     void tiqueteEnOtroEstadoNoEsValido() throws Exception {
-        when(tickets.marcarUsado(ticket.getId(), AHORA, validador)).thenReturn(0);
-        poner(ticket, "estado", "ANULADO");
+        when(tickets.marcarUsado(ticket.getId(), ticket.getQrToken(), AHORA, validador)).thenReturn(0);
+        poner(ticket, "estado", "DESCONOCIDO");
         when(tickets.findById(ticket.getId())).thenReturn(Optional.of(ticket));
 
         assertThat(service.validate(ticket.getQrCode(), validador)).containsExactlyInAnyOrderEntriesOf(
-                Map.of("valido", false, "motivo", "TIQUETE_NO_VALIDO", "estado", "ANULADO"));
+                Map.of("valido", false, "motivo", "TIQUETE_NO_VALIDO", "estado", "DESCONOCIDO"));
+    }
+
+    @ParameterizedTest(name = "{0} -> 409 {1}")
+    @CsvSource({"REPROGRAMADO, TICKET_RESCHEDULED", "ANULADO, TICKET_VOIDED"})
+    void tiqueteReprogramadoOAnuladoResponde409(String estado, String codigo) throws Exception {
+        when(tickets.marcarUsado(ticket.getId(), ticket.getQrToken(), AHORA, validador)).thenReturn(0);
+        poner(ticket, "estado", estado);
+        when(tickets.findById(ticket.getId())).thenReturn(Optional.of(ticket));
+
+        assertThatThrownBy(() -> service.validate(ticket.getQrCode(), validador))
+                .isInstanceOfSatisfying(ApiException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(e.getCode()).isEqualTo(codigo);
+                });
+    }
+
+    @Test
+    void qrReemplazadoPorUnCambioDeAsientoYaNoValida() throws Exception {
+        Booking booking = new Booking(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), null,
+                List.of("14"), new BigDecimal("95000"), "COP", AHORA, AHORA);
+        ArgumentCaptor<String> qr = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> token = ArgumentCaptor.forClass(String.class);
+        when(tickets.reemplazarQr(eq(ticket.getId()), qr.capture(), token.capture())).thenReturn(1);
+
+        assertThat(service.reissueQr(ticket.getId(), booking)).isTrue();
+        assertThat(qr.getValue()).contains("|14|").endsWith("|" + token.getValue()).isNotEqualTo(ticket.getQrCode());
+
+        // El QR viejo tiene firma válida pero ya no es el vigente: el UPDATE condicional no afecta la fila.
+        when(tickets.marcarUsado(ticket.getId(), ticket.getQrToken(), AHORA, validador)).thenReturn(0);
+        when(tickets.findById(ticket.getId())).thenReturn(Optional.of(ticket));
+        assertThat(service.validate(ticket.getQrCode(), validador))
+                .containsExactlyInAnyOrderEntriesOf(Map.of("valido", false, "motivo", "QR_REEMPLAZADO"));
+        // Y el nuevo sí se valida con su propio token.
+        when(tickets.marcarUsado(ticket.getId(), token.getValue(), AHORA, validador)).thenReturn(1);
+        poner(ticket, "estado", "USADO");
+        poner(ticket, "usadoEn", AHORA);
+        assertThat(service.validate(qr.getValue(), validador)).containsEntry("valido", true)
+                .containsEntry("asientos", "14");
+    }
+
+    @Test
+    void reemitirQrDeUnTiqueteQueYaNoEstaEmitidoDevuelveFalse() {
+        when(tickets.reemplazarQr(any(), any(), any())).thenReturn(0);
+        Booking booking = new Booking(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), null,
+                List.of("14"), new BigDecimal("95000"), "COP", AHORA, AHORA);
+
+        assertThat(service.reissueQr(ticket.getId(), booking)).isFalse();
     }
 
     @Test
     void tiqueteInexistente() {
-        when(tickets.marcarUsado(ticket.getId(), AHORA, validador)).thenReturn(0);
+        when(tickets.marcarUsado(ticket.getId(), ticket.getQrToken(), AHORA, validador)).thenReturn(0);
         when(tickets.findById(ticket.getId())).thenReturn(Optional.empty());
 
         assertThat(service.validate(ticket.getQrCode(), validador))
@@ -107,6 +161,6 @@ class TicketServiceTest {
 
         assertThat(service.validate(falsificado, validador)).containsEntry("motivo", "FIRMA_INVALIDA");
         assertThat(service.validate("OTRO|cosa", validador)).containsEntry("motivo", "FORMATO_INVALIDO");
-        verify(tickets, never()).marcarUsado(any(), any(), any());
+        verify(tickets, never()).marcarUsado(any(), any(), any(), any());
     }
 }

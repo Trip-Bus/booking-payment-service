@@ -8,7 +8,10 @@ RUN mvn -B -q package -DskipTests
 
 # ---- Etapa 2: imagen de ejecución (solo JRE) ----
 FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S tripbus && adduser -S tripbus -G tripbus
+# apk upgrade: parches de seguridad de Alpine más nuevos que los que trae la imagen base (Trivy falla con
+# CRITICAL/HIGH que ya tienen arreglo, p. ej. CVE-2026-111497 de brotli-libs). Sin caché de apk en la imagen.
+RUN apk upgrade --no-cache \
+    && addgroup -S tripbus && adduser -S tripbus -G tripbus
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 USER tripbus
